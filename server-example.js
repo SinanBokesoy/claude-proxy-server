@@ -35,7 +35,7 @@ app.post('/api/claude', async (req, res) => {
     console.log('Claude API request received:', JSON.stringify(req.body, null, 2));
     
     try {
-        const { message, model = 'claude-3-sonnet-20240229', device_id } = req.body;
+        const { message, model = 'claude-sonnet-4-20250514', device_id } = req.body;
         
         if (!message) {
             return res.status(400).json({ error: 'Message is required' });
