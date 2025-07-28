@@ -1,6 +1,7 @@
 const express = require('express');
 const { exec } = require('child_process');
 const cors = require('cors');
+const { google } = require('googleapis');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -14,6 +15,41 @@ if (!process.env.CLAUDE_API_KEY) {
     console.error('Missing required environment variable: CLAUDE_API_KEY');
 }
 
+// Google Sheets setup
+let sheets = null;
+let auth = null;
+
+async function initializeGoogleSheets() {
+    try {
+        if (!process.env.GOOGLE_PRIVATE_KEY || !process.env.GOOGLE_CLIENT_EMAIL) {
+            console.log('Google credentials not configured - using mock validation');
+            return false;
+        }
+
+        // Clean up the private key (handle newlines and escape characters)
+        const privateKey = process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n');
+        
+        auth = new google.auth.JWT(
+            process.env.GOOGLE_CLIENT_EMAIL,
+            null,
+            privateKey,
+            ['https://www.googleapis.com/auth/spreadsheets']
+        );
+
+        await auth.authorize();
+        sheets = google.sheets({ version: 'v4', auth });
+        
+        console.log('✅ Google Sheets API initialized successfully');
+        return true;
+    } catch (error) {
+        console.error('❌ Failed to initialize Google Sheets:', error.message);
+        return false;
+    }
+}
+
+// Initialize Google Sheets on startup
+initializeGoogleSheets();
+
 // Health check endpoint
 app.get('/health', (req, res) => {
     const status = {
@@ -22,6 +58,9 @@ app.get('/health', (req, res) => {
         environment: {
             hasClaudeKey: !!process.env.CLAUDE_API_KEY,
             hasGoogleKey: !!process.env.GOOGLE_PRIVATE_KEY,
+            hasGoogleEmail: !!process.env.GOOGLE_CLIENT_EMAIL,
+            hasSpreadsheetId: !!process.env.GOOGLE_SPREADSHEET_ID,
+            googleSheetsReady: !!sheets,
             port: PORT,
             nodeVersion: process.version,
             platform: process.platform
@@ -29,6 +68,97 @@ app.get('/health', (req, res) => {
     };
     res.json(status);
 });
+
+// Helper function to find user in Google Sheets
+async function findUserInSheet(serialNumber) {
+    if (!sheets || !process.env.GOOGLE_SPREADSHEET_ID) {
+        throw new Error('Google Sheets not initialized');
+    }
+
+    try {
+        console.log(`Searching for serial number: ${serialNumber}`);
+        
+        // Get all data from the sheet
+        const response = await sheets.spreadsheets.values.get({
+            spreadsheetId: process.env.GOOGLE_SPREADSHEET_ID,
+            range: 'Sheet1!A:Z', // Get all columns
+        });
+
+        const rows = response.data.values;
+        if (!rows || rows.length === 0) {
+            console.log('No data found in spreadsheet');
+            return null;
+        }
+
+        console.log(`Found ${rows.length} rows in spreadsheet`);
+        
+        // Find header row to identify columns
+        const headers = rows[0];
+        const serialColumnIndex = headers.findIndex(header => 
+            header && header.toLowerCase().includes('serial')
+        );
+        const tokenColumnIndex = headers.findIndex(header => 
+            header && header.toLowerCase().includes('token')
+        );
+
+        console.log(`Serial column index: ${serialColumnIndex}, Token column index: ${tokenColumnIndex}`);
+
+        if (serialColumnIndex === -1 || tokenColumnIndex === -1) {
+            throw new Error('Could not find Serial or Token columns in spreadsheet');
+        }
+
+        // Search for the serial number
+        for (let i = 1; i < rows.length; i++) {
+            const row = rows[i];
+            if (row[serialColumnIndex] === serialNumber) {
+                const tokens = parseInt(row[tokenColumnIndex]) || 0;
+                console.log(`Found user: row ${i + 1}, tokens: ${tokens}`);
+                return {
+                    rowIndex: i + 1, // 1-based for Google Sheets API
+                    serialColumnIndex: serialColumnIndex,
+                    tokenColumnIndex: tokenColumnIndex,
+                    currentTokens: tokens,
+                    isValid: tokens > 0
+                };
+            }
+        }
+
+        console.log('Serial number not found in spreadsheet');
+        return null;
+    } catch (error) {
+        console.error('Error searching Google Sheets:', error);
+        throw error;
+    }
+}
+
+// Helper function to update tokens in Google Sheets
+async function updateTokensInSheet(rowIndex, columnIndex, newTokenValue) {
+    if (!sheets || !process.env.GOOGLE_SPREADSHEET_ID) {
+        throw new Error('Google Sheets not initialized');
+    }
+
+    try {
+        const columnLetter = String.fromCharCode(65 + columnIndex); // Convert 0->A, 1->B, etc.
+        const range = `Sheet1!${columnLetter}${rowIndex}`;
+        
+        console.log(`Updating ${range} with value: ${newTokenValue}`);
+
+        await sheets.spreadsheets.values.update({
+            spreadsheetId: process.env.GOOGLE_SPREADSHEET_ID,
+            range: range,
+            valueInputOption: 'RAW',
+            requestBody: {
+                values: [[newTokenValue]]
+            }
+        });
+
+        console.log('✅ Successfully updated Google Sheets');
+        return true;
+    } catch (error) {
+        console.error('❌ Error updating Google Sheets:', error);
+        throw error;
+    }
+}
 
 // Claude API proxy endpoint - using curl like your working JUCE version
 app.post('/api/claude', async (req, res) => {
@@ -149,10 +279,17 @@ app.post('/api/claude', async (req, res) => {
                 // Calculate token usage if available
                 let tokenUsage = {
                     input: responseData.usage?.input_tokens || 0,
-                    output: responseData.usage?.output_tokens || 0
+                    output: responseData.usage?.output_tokens || 0,
+                    cache_creation: responseData.usage?.cache_creation_input_tokens || 0,
+                    cache_read: responseData.usage?.cache_read_input_tokens || 0
                 };
                 
+                // Calculate total tokens consumed (matching your JUCE calculation)
+                const totalTokensConsumed = tokenUsage.input + tokenUsage.output + 
+                                          tokenUsage.cache_creation + tokenUsage.cache_read;
+                
                 console.log('Token usage:', tokenUsage);
+                console.log('Total tokens consumed:', totalTokensConsumed);
                 
                 // Send response in format expected by your JUCE client
                 const responsePayload = {
@@ -161,6 +298,7 @@ app.post('/api/claude', async (req, res) => {
                     device_id: device_id,
                     status: 'success',
                     tokens: tokenUsage,
+                    total_tokens_consumed: totalTokensConsumed,
                     timestamp: new Date().toISOString()
                 };
                 
@@ -188,7 +326,7 @@ app.post('/api/claude', async (req, res) => {
     }
 });
 
-// Google Sheets validation endpoint (unchanged)
+// Google Sheets validation endpoint
 app.post('/api/validate', async (req, res) => {
     console.log('Validation request received:', JSON.stringify(req.body, null, 2));
     
@@ -199,16 +337,57 @@ app.post('/api/validate', async (req, res) => {
             return res.status(400).json({ error: 'Serial number and device ID are required' });
         }
         
-        // Mock validation for testing
-        const isValid = serial_number.length > 5;
-        return res.json({
-            valid: isValid,
-            serial_number: serial_number,
-            device_id: device_id,
-            tokens_remaining: isValid ? 1000 : 0,
-            source: 'mock',
-            timestamp: new Date().toISOString()
-        });
+        // Check if Google Sheets is available
+        if (!sheets) {
+            console.log('Google Sheets not available, using mock validation');
+            const isValid = serial_number.length > 5;
+            return res.json({
+                valid: isValid,
+                serial_number: serial_number,
+                device_id: device_id,
+                tokens_remaining: isValid ? 1000 : 0,
+                source: 'mock',
+                timestamp: new Date().toISOString()
+            });
+        }
+        
+        try {
+            // Real Google Sheets validation
+            console.log('Performing real Google Sheets validation...');
+            const userInfo = await findUserInSheet(serial_number);
+            
+            if (!userInfo) {
+                return res.json({
+                    valid: false,
+                    error: 'Serial number not found',
+                    serial_number: serial_number,
+                    device_id: device_id,
+                    tokens_remaining: 0,
+                    source: 'google_sheets',
+                    timestamp: new Date().toISOString()
+                });
+            }
+            
+            return res.json({
+                valid: userInfo.isValid,
+                serial_number: serial_number,
+                device_id: device_id,
+                tokens_remaining: userInfo.currentTokens,
+                row_index: userInfo.rowIndex,
+                source: 'google_sheets',
+                timestamp: new Date().toISOString()
+            });
+            
+        } catch (googleError) {
+            console.error('Google Sheets validation error:', googleError);
+            return res.status(500).json({
+                error: 'Google Sheets validation failed',
+                details: googleError.message,
+                serial_number: serial_number,
+                device_id: device_id,
+                timestamp: new Date().toISOString()
+            });
+        }
         
     } catch (error) {
         console.error('Validation error:', error);
@@ -220,7 +399,7 @@ app.post('/api/validate', async (req, res) => {
     }
 });
 
-// Token consumption endpoint (unchanged)
+// Token consumption endpoint
 app.post('/api/consume-tokens', async (req, res) => {
     console.log('Token consumption request received:', JSON.stringify(req.body, null, 2));
     
@@ -231,22 +410,87 @@ app.post('/api/consume-tokens', async (req, res) => {
             return res.status(400).json({ error: 'Serial number, device ID, and tokens_to_consume (number) are required' });
         }
         
-        // Mock token consumption for testing
-        const mockTokensRemaining = Math.max(0, 1000 - tokens_to_consume);
+        if (tokens_to_consume <= 0) {
+            return res.status(400).json({ error: 'tokens_to_consume must be positive' });
+        }
         
-        res.json({
-            success: true,
-            new_tokens: mockTokensRemaining,
-            consumed: tokens_to_consume,
-            serial_number: serial_number,
-            device_id: device_id,
-            source: 'mock',
-            timestamp: new Date().toISOString()
-        });
+        // Check if Google Sheets is available
+        if (!sheets) {
+            console.log('Google Sheets not available, using mock token consumption');
+            const mockTokensRemaining = Math.max(0, 1000 - tokens_to_consume);
+            return res.json({
+                success: true,
+                new_tokens: mockTokensRemaining,
+                consumed: tokens_to_consume,
+                serial_number: serial_number,
+                device_id: device_id,
+                source: 'mock',
+                timestamp: new Date().toISOString()
+            });
+        }
+        
+        try {
+            // Real Google Sheets token consumption
+            console.log('Performing real Google Sheets token consumption...');
+            const userInfo = await findUserInSheet(serial_number);
+            
+            if (!userInfo) {
+                return res.status(404).json({
+                    success: false,
+                    error: 'Serial number not found',
+                    serial_number: serial_number,
+                    device_id: device_id,
+                    timestamp: new Date().toISOString()
+                });
+            }
+            
+            if (userInfo.currentTokens < tokens_to_consume) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'Insufficient tokens',
+                    current_tokens: userInfo.currentTokens,
+                    requested: tokens_to_consume,
+                    serial_number: serial_number,
+                    device_id: device_id,
+                    timestamp: new Date().toISOString()
+                });
+            }
+            
+            // Calculate new token value
+            const newTokenValue = userInfo.currentTokens - tokens_to_consume;
+            
+            // Update Google Sheets
+            await updateTokensInSheet(userInfo.rowIndex, userInfo.tokenColumnIndex, newTokenValue);
+            
+            console.log(`✅ Successfully consumed ${tokens_to_consume} tokens. New balance: ${newTokenValue}`);
+            
+            return res.json({
+                success: true,
+                new_tokens: newTokenValue,
+                consumed: tokens_to_consume,
+                previous_tokens: userInfo.currentTokens,
+                serial_number: serial_number,
+                device_id: device_id,
+                source: 'google_sheets',
+                timestamp: new Date().toISOString()
+            });
+            
+        } catch (googleError) {
+            console.error('Google Sheets token consumption error:', googleError);
+            return res.status(500).json({
+                success: false,
+                error: 'Google Sheets token consumption failed',
+                details: googleError.message,
+                serial_number: serial_number,
+                device_id: device_id,
+                timestamp: new Date().toISOString()
+            });
+        }
         
     } catch (error) {
         console.error('Token consumption error:', error);
         res.status(500).json({ 
+            success: false,
             error: 'Token consumption failed',
             details: error.message,
             timestamp: new Date().toISOString()
@@ -270,6 +514,9 @@ app.listen(PORT, () => {
     console.log('Using curl-based implementation matching JUCE version');
     console.log('Environment check:');
     console.log('- CLAUDE_API_KEY:', process.env.CLAUDE_API_KEY ? 'Present ✓' : 'Missing ✗');
+    console.log('- GOOGLE_PRIVATE_KEY:', process.env.GOOGLE_PRIVATE_KEY ? 'Present ✓' : 'Missing ✗');
+    console.log('- GOOGLE_CLIENT_EMAIL:', process.env.GOOGLE_CLIENT_EMAIL ? 'Present ✓' : 'Missing ✗');
+    console.log('- GOOGLE_SPREADSHEET_ID:', process.env.GOOGLE_SPREADSHEET_ID ? 'Present ✓' : 'Missing ✗');
     console.log('- Node.js version:', process.version);
     console.log('- Platform:', process.platform);
     console.log('\nServer ready to handle requests...');
