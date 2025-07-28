@@ -6,9 +6,33 @@ const { google } = require('googleapis');
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// Middleware
-app.use(cors());
-app.use(express.json({ limit: '10mb' }));
+// Enhanced security middleware
+app.use(cors({
+    origin: process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : '*',
+    credentials: true,
+    optionsSuccessStatus: 200
+}));
+
+// Security headers middleware
+app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('X-XSS-Protection', '1; mode=block');
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    res.setHeader('Content-Security-Policy', "default-src 'self'");
+    next();
+});
+
+// Rate limiting would go here (if needed)
+app.use(express.json({ 
+    limit: '10mb',
+    verify: (req, res, buf, encoding) => {
+        // Basic request validation
+        if (req.headers['content-type'] !== 'application/json') {
+            throw new Error('Invalid content type');
+        }
+    }
+}));
 
 // Environment validation
 if (!process.env.CLAUDE_API_KEY) {
@@ -160,8 +184,27 @@ async function updateTokensInSheet(rowIndex, columnIndex, newTokenValue) {
     }
 }
 
+// Request authentication middleware
+function authenticateRequest(req, res, next) {
+    const userAgent = req.headers['user-agent'];
+    const contentType = req.headers['content-type'];
+    
+    // Basic client validation
+    if (!userAgent || !userAgent.includes('SecureJUCEClient')) {
+        console.log('⚠️ Unauthorized request - invalid user agent:', userAgent);
+        return res.status(403).json({ error: 'Unauthorized client' });
+    }
+    
+    if (contentType !== 'application/json') {
+        console.log('⚠️ Unauthorized request - invalid content type:', contentType);
+        return res.status(400).json({ error: 'Invalid content type' });
+    }
+    
+    next();
+}
+
 // Claude API proxy endpoint - using curl like your working JUCE version
-app.post('/api/claude', async (req, res) => {
+app.post('/api/claude', authenticateRequest, async (req, res) => {
     console.log('Claude API request received:', JSON.stringify(req.body, null, 2));
     
     try {
@@ -327,7 +370,7 @@ app.post('/api/claude', async (req, res) => {
 });
 
 // Google Sheets validation endpoint
-app.post('/api/validate', async (req, res) => {
+app.post('/api/validate', authenticateRequest, async (req, res) => {
     console.log('Validation request received:', JSON.stringify(req.body, null, 2));
     
     try {
@@ -400,7 +443,7 @@ app.post('/api/validate', async (req, res) => {
 });
 
 // Token consumption endpoint
-app.post('/api/consume-tokens', async (req, res) => {
+app.post('/api/consume-tokens', authenticateRequest, async (req, res) => {
     console.log('Token consumption request received:', JSON.stringify(req.body, null, 2));
     
     try {
