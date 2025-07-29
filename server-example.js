@@ -341,7 +341,7 @@ app.post('/api/claude', authenticateRequest, async (req, res) => {
         // Create the request payload exactly like your JUCE version
         const requestPayload = {
             model: model,
-            max_tokens: 1000,
+            max_tokens: 1500,
             messages: [
                 {
                     role: 'user',
