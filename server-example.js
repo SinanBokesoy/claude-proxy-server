@@ -74,6 +74,119 @@ async function initializeGoogleSheets() {
 // Initialize Google Sheets on startup
 initializeGoogleSheets();
 
+// JSON validation and repair functions
+function isValidJson(str) {
+    try {
+        JSON.parse(str);
+        return true;
+    } catch (error) {
+        return false;
+    }
+}
+
+function extractJsonFromResponse(text) {
+    // Remove markdown code blocks
+    let cleaned = text.replace(/```json\s*/g, '').replace(/```\s*$/g, '');
+    
+    // Find first { and attempt to find matching }
+    const startIndex = cleaned.indexOf('{');
+    if (startIndex === -1) return null;
+    
+    // Try to find the complete JSON by counting braces
+    let braceCount = 0;
+    let endIndex = -1;
+    
+    for (let i = startIndex; i < cleaned.length; i++) {
+        if (cleaned[i] === '{') {
+            braceCount++;
+        } else if (cleaned[i] === '}') {
+            braceCount--;
+            if (braceCount === 0) {
+                endIndex = i;
+                break;
+            }
+        }
+    }
+    
+    if (endIndex !== -1) {
+        return cleaned.substring(startIndex, endIndex + 1);
+    }
+    
+    return null;
+}
+
+function repairTruncatedJson(jsonStr) {
+    if (!jsonStr || !jsonStr.startsWith('{')) {
+        return null;
+    }
+    
+    console.log('Attempting to repair truncated JSON...');
+    
+    // Count unmatched brackets and braces
+    let openBraces = 0;
+    let openBrackets = 0;
+    let inString = false;
+    let escaped = false;
+    
+    for (let i = 0; i < jsonStr.length; i++) {
+        const char = jsonStr[i];
+        
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        
+        if (char === '\\') {
+            escaped = true;
+            continue;
+        }
+        
+        if (char === '"') {
+            inString = !inString;
+            continue;
+        }
+        
+        if (!inString) {
+            if (char === '{') {
+                openBraces++;
+            } else if (char === '}') {
+                openBraces--;
+            } else if (char === '[') {
+                openBrackets++;
+            } else if (char === ']') {
+                openBrackets--;
+            }
+        }
+    }
+    
+    // If we have unmatched brackets/braces, try to close them
+    if (openBraces > 0 || openBrackets > 0) {
+        let repaired = jsonStr;
+        
+        // Add missing closing brackets
+        for (let i = 0; i < openBrackets; i++) {
+            repaired += '\n  ]';
+        }
+        
+        // Add missing closing braces
+        for (let i = 0; i < openBraces; i++) {
+            repaired += '\n}';
+        }
+        
+        console.log(`Added ${openBrackets} closing brackets and ${openBraces} closing braces`);
+        
+        // Test if the repaired JSON is valid
+        if (isValidJson(repaired)) {
+            console.log('✅ Successfully repaired truncated JSON');
+            return repaired;
+        } else {
+            console.log('❌ Could not repair JSON - still invalid after adding closers');
+        }
+    }
+    
+    return null;
+}
+
 // Health check endpoint
 app.get('/health', (req, res) => {
     const status = {
@@ -318,6 +431,32 @@ app.post('/api/claude', authenticateRequest, async (req, res) => {
                 
                 console.log('Extracted response text length:', responseText.length);
                 console.log('Response text preview:', responseText.substring(0, 200) + '...');
+
+                // NEW: Validate and repair JSON before sending to client
+                let finalResponseText = responseText;
+                const extractedJson = extractJsonFromResponse(responseText);
+
+                if (extractedJson) {
+                    console.log('Found JSON in response, length:', extractedJson.length);
+                    
+                    if (isValidJson(extractedJson)) {
+                        console.log('✅ JSON is valid');
+                        finalResponseText = extractedJson;
+                    } else {
+                        console.log('❌ JSON is invalid, attempting repair...');
+                        const repairedJson = repairTruncatedJson(extractedJson);
+                        
+                        if (repairedJson) {
+                            console.log('✅ Successfully repaired JSON');
+                            finalResponseText = repairedJson;
+                        } else {
+                            console.log('❌ Could not repair JSON, sending original response');
+                            // Keep original response
+                        }
+                    }
+                } else {
+                    console.log('No JSON found in response, sending as-is');
+                }
                 
                 // Calculate token usage if available
                 let tokenUsage = {
@@ -336,7 +475,7 @@ app.post('/api/claude', authenticateRequest, async (req, res) => {
                 
                 // Send response in format expected by your JUCE client
                 const responsePayload = {
-                    response: responseText,
+                    response: finalResponseText, // Use validated/repaired JSON
                     model: model,
                     device_id: device_id,
                     status: 'success',
@@ -555,6 +694,7 @@ app.use((error, req, res, next) => {
 app.listen(PORT, () => {
     console.log(`Proxy server running on port ${PORT}`);
     console.log('Using curl-based implementation matching JUCE version');
+    console.log('✅ JSON validation and repair enabled');
     console.log('Environment check:');
     console.log('- CLAUDE_API_KEY:', process.env.CLAUDE_API_KEY ? 'Present ✓' : 'Missing ✗');
     console.log('- GOOGLE_PRIVATE_KEY:', process.env.GOOGLE_PRIVATE_KEY ? 'Present ✓' : 'Missing ✗');
