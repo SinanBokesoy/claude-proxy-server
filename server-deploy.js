@@ -160,8 +160,16 @@ async function findOrderInSheet(orderNumber) {
         const tokensColumnIndex = headers.findIndex(header => 
             header && header.toLowerCase().includes('token')
         );
+        // NEW: Find Activated and Terminated columns
+        const activatedColumnIndex = headers.findIndex(header => 
+            header && header.toLowerCase().includes('activated')
+        );
+        const terminatedColumnIndex = headers.findIndex(header => 
+            header && header.toLowerCase().includes('terminated')
+        );
 
         console.log(`🔍 Order column index: ${orderColumnIndex}, Tokens column index: ${tokensColumnIndex}`);
+        console.log(`🔍 Activated column index: ${activatedColumnIndex}, Terminated column index: ${terminatedColumnIndex}`);
 
         if (orderColumnIndex === -1) {
             console.log('❌ Could not find Order column in spreadsheet');
@@ -183,11 +191,20 @@ async function findOrderInSheet(orderNumber) {
             
             if (cleanRowOrderNumber === cleanOrderNumber) {
                 const tokens = tokensColumnIndex !== -1 ? (parseInt(row[tokensColumnIndex]) || 0) : 1000;
-                console.log(`✅ FOUND ORDER! Row ${i + 1}, tokens: ${tokens}`);
+                const isActivated = activatedColumnIndex !== -1 ? (row[activatedColumnIndex] === 'TRUE') : false;
+                const isTerminated = terminatedColumnIndex !== -1 ? (row[terminatedColumnIndex] === 'TRUE') : false;
+                
+                console.log(`✅ FOUND ORDER! Row ${i + 1}, tokens: ${tokens}, activated: ${isActivated}, terminated: ${isTerminated}`);
                 return {
                     orderNumber: rowOrderNumber,
                     tokens: tokens,
-                    rowIndex: i + 1
+                    rowIndex: i + 1,
+                    orderColumnIndex: orderColumnIndex,
+                    tokensColumnIndex: tokensColumnIndex,
+                    activatedColumnIndex: activatedColumnIndex,
+                    terminatedColumnIndex: terminatedColumnIndex,
+                    isActivated: isActivated,
+                    isTerminated: isTerminated
                 };
             }
         }
@@ -237,8 +254,13 @@ async function findUserInSheet(serialNumber) {
         const tokenColumnIndex = headers.findIndex(header => 
             header && header.toLowerCase().includes('token')
         );
+        // NEW: Find Terminated column for user lookup too
+        const terminatedColumnIndex = headers.findIndex(header => 
+            header && header.toLowerCase().includes('terminated')
+        );
 
         console.log(`Serial column index: ${serialColumnIndex}, Token column index: ${tokenColumnIndex}`);
+        console.log(`Terminated column index: ${terminatedColumnIndex}`);
 
         if (serialColumnIndex === -1 || tokenColumnIndex === -1) {
             throw new Error('Could not find Serial or Token columns in spreadsheet');
@@ -248,13 +270,16 @@ async function findUserInSheet(serialNumber) {
             const row = rows[i];
             if (row[serialColumnIndex] === serialNumber) {
                 const tokens = parseInt(row[tokenColumnIndex]) || 0;
-                console.log(`Found user: row ${i + 1}, tokens: ${tokens}`);
+                const isTerminated = terminatedColumnIndex !== -1 ? (row[terminatedColumnIndex] === 'TRUE') : false;
+                console.log(`Found user: row ${i + 1}, tokens: ${tokens}, terminated: ${isTerminated}`);
                 return {
                     rowIndex: i + 1,
                     serialColumnIndex: serialColumnIndex,
                     tokenColumnIndex: tokenColumnIndex,
+                    terminatedColumnIndex: terminatedColumnIndex,
                     currentTokens: tokens,
-                    isValid: tokens > 0
+                    isValid: tokens > 0,
+                    isTerminated: isTerminated
                 };
             }
         }
@@ -321,7 +346,7 @@ async function updateTokensInSheet(rowIndex, columnIndex, newTokenValue) {
         const columnLetter = String.fromCharCode(65 + columnIndex);
         const range = `Sheet1!${columnLetter}${rowIndex}`;
         
-        console.log(`Updating ${range} with value: ${newTokenValue}`);
+        console.log(`Updating ${range} with token value: ${newTokenValue}`);
 
         await sheets.spreadsheets.values.update({
             spreadsheetId: process.env.GOOGLE_SPREADSHEET_ID,
@@ -332,10 +357,70 @@ async function updateTokensInSheet(rowIndex, columnIndex, newTokenValue) {
             }
         });
 
-        console.log('✅ Successfully updated Google Sheets');
+        console.log('✅ Successfully updated tokens in Google Sheets');
         return true;
     } catch (error) {
-        console.error('❌ Error updating Google Sheets:', error);
+        console.error('❌ Error updating tokens in Google Sheets:', error);
+        throw error;
+    }
+}
+
+// NEW: Helper function to update Activated column to TRUE
+async function updateActivatedStatus(rowIndex, columnIndex) {
+    if (!sheets || !process.env.GOOGLE_SPREADSHEET_ID || columnIndex === -1) {
+        console.log('⚠️ Cannot update Activated status - Google Sheets not initialized or column not found');
+        return false;
+    }
+
+    try {
+        const columnLetter = String.fromCharCode(65 + columnIndex);
+        const range = `Sheet1!${columnLetter}${rowIndex}`;
+        
+        console.log(`🔄 Updating ${range} with Activated: TRUE`);
+
+        await sheets.spreadsheets.values.update({
+            spreadsheetId: process.env.GOOGLE_SPREADSHEET_ID,
+            range: range,
+            valueInputOption: 'RAW',
+            requestBody: {
+                values: [['TRUE']]
+            }
+        });
+
+        console.log('✅ Successfully updated Activated status to TRUE');
+        return true;
+    } catch (error) {
+        console.error('❌ Error updating Activated status:', error);
+        throw error;
+    }
+}
+
+// NEW: Helper function to update Terminated column to TRUE
+async function updateTerminatedStatus(rowIndex, columnIndex) {
+    if (!sheets || !process.env.GOOGLE_SPREADSHEET_ID || columnIndex === -1) {
+        console.log('⚠️ Cannot update Terminated status - Google Sheets not initialized or column not found');
+        return false;
+    }
+
+    try {
+        const columnLetter = String.fromCharCode(65 + columnIndex);
+        const range = `Sheet1!${columnLetter}${rowIndex}`;
+        
+        console.log(`🔄 Updating ${range} with Terminated: TRUE`);
+
+        await sheets.spreadsheets.values.update({
+            spreadsheetId: process.env.GOOGLE_SPREADSHEET_ID,
+            range: range,
+            valueInputOption: 'RAW',
+            requestBody: {
+                values: [['TRUE']]
+            }
+        });
+
+        console.log('✅ Successfully updated Terminated status to TRUE');
+        return true;
+    } catch (error) {
+        console.error('❌ Error updating Terminated status:', error);
         throw error;
     }
 }
@@ -396,6 +481,16 @@ app.post('/api/claim-tokens', authenticateRequest, async (req, res) => {
             console.log(`✅ STEP 2: Order found! Adding ${orderInfo.tokens} tokens to user ${serial_number}`);
             const tokenResult = await addTokensToUser(serial_number, orderInfo.tokens);
             
+            // NEW: STEP 3: Update Activated column to TRUE (if not already activated)
+            if (!orderInfo.isActivated && orderInfo.activatedColumnIndex !== -1) {
+                console.log(`🔄 STEP 3: Setting Activated = TRUE for order ${order_number}`);
+                await updateActivatedStatus(orderInfo.rowIndex, orderInfo.activatedColumnIndex);
+            } else if (orderInfo.isActivated) {
+                console.log(`⚠️ Order ${order_number} is already activated`);
+            } else {
+                console.log(`⚠️ Activated column not found - cannot update activation status`);
+            }
+            
             console.log(`🎉 SUCCESS! Claimed ${orderInfo.tokens} tokens for order ${order_number}`);
             
             return res.json({
@@ -406,6 +501,7 @@ app.post('/api/claim-tokens', authenticateRequest, async (req, res) => {
                 tokens_claimed: orderInfo.tokens,
                 new_token_balance: tokenResult.newTokens,
                 previous_token_balance: tokenResult.previousTokens,
+                was_activated: !orderInfo.isActivated,
                 timestamp: new Date().toISOString()
             });
             
@@ -432,6 +528,199 @@ app.post('/api/claim-tokens', authenticateRequest, async (req, res) => {
     }
 });
 
+// Token consumption endpoint with termination tracking
+app.post('/api/consume-tokens', authenticateRequest, async (req, res) => {
+    console.log('🎯 Token consumption request received:', JSON.stringify(req.body, null, 2));
+    
+    try {
+        const { serial_number, tokens_to_consume, device_id } = req.body;
+        
+        if (!serial_number || !device_id || typeof tokens_to_consume !== 'number') {
+            return res.status(400).json({ error: 'Serial number, device ID, and tokens_to_consume (number) are required' });
+        }
+        
+        if (tokens_to_consume <= 0) {
+            return res.status(400).json({ error: 'tokens_to_consume must be positive' });
+        }
+        
+        // Check if Google Sheets is available
+        if (!sheets) {
+            console.log('❌ Google Sheets not available, using mock token consumption');
+            const mockTokensRemaining = Math.max(0, 1000 - tokens_to_consume);
+            return res.json({
+                success: true,
+                new_tokens: mockTokensRemaining,
+                consumed: tokens_to_consume,
+                serial_number: serial_number,
+                device_id: device_id,
+                source: 'mock',
+                timestamp: new Date().toISOString()
+            });
+        }
+        
+        try {
+            // Real Google Sheets token consumption
+            console.log('🔍 STEP 1: Finding user in spreadsheet...');
+            const userInfo = await findUserInSheet(serial_number);
+            
+            if (!userInfo) {
+                return res.status(404).json({
+                    success: false,
+                    error: 'Serial number not found',
+                    serial_number: serial_number,
+                    device_id: device_id,
+                    timestamp: new Date().toISOString()
+                });
+            }
+            
+            if (userInfo.currentTokens < tokens_to_consume) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'Insufficient tokens',
+                    current_tokens: userInfo.currentTokens,
+                    requested: tokens_to_consume,
+                    serial_number: serial_number,
+                    device_id: device_id,
+                    timestamp: new Date().toISOString()
+                });
+            }
+            
+            // Calculate new token value
+            const newTokenValue = userInfo.currentTokens - tokens_to_consume;
+            
+            console.log(`🔄 STEP 2: Updating tokens from ${userInfo.currentTokens} to ${newTokenValue}`);
+            await updateTokensInSheet(userInfo.rowIndex, userInfo.tokenColumnIndex, newTokenValue);
+            
+            // NEW: STEP 3: Check if user should be terminated (tokens = 0)
+            let wasTerminated = false;
+            if (newTokenValue === 0) {
+                console.log(`⚠️ STEP 3: User has 0 tokens - checking termination status`);
+                
+                // Find the user again to get termination column info
+                const userWithTerminationInfo = await findUserInSheet(serial_number);
+                if (userWithTerminationInfo && userWithTerminationInfo.terminatedColumnIndex !== -1) {
+                    if (!userWithTerminationInfo.isTerminated) {
+                        console.log(`🔄 Setting Terminated = TRUE for user ${serial_number}`);
+                        await updateTerminatedStatus(userWithTerminationInfo.rowIndex, userWithTerminationInfo.terminatedColumnIndex);
+                        wasTerminated = true;
+                    } else {
+                        console.log(`⚠️ User ${serial_number} is already terminated`);
+                    }
+                } else {
+                    console.log(`⚠️ Terminated column not found - cannot update termination status`);
+                }
+            }
+            
+            console.log(`✅ Successfully consumed ${tokens_to_consume} tokens. New balance: ${newTokenValue}`);
+            
+            return res.json({
+                success: true,
+                new_tokens: newTokenValue,
+                consumed: tokens_to_consume,
+                previous_tokens: userInfo.currentTokens,
+                serial_number: serial_number,
+                device_id: device_id,
+                was_terminated: wasTerminated,
+                source: 'google_sheets',
+                timestamp: new Date().toISOString()
+            });
+            
+        } catch (googleError) {
+            console.error('❌ Google Sheets token consumption error:', googleError);
+            return res.status(500).json({
+                success: false,
+                error: 'Google Sheets token consumption failed',
+                details: googleError.message,
+                serial_number: serial_number,
+                device_id: device_id,
+                timestamp: new Date().toISOString()
+            });
+        }
+        
+    } catch (error) {
+        console.error('❌ Token consumption error:', error);
+        res.status(500).json({ 
+            success: false,
+            error: 'Token consumption failed',
+            details: error.message,
+            timestamp: new Date().toISOString()
+        });
+    }
+});
+
+// Google Sheets validation endpoint  
+app.post('/api/validate', authenticateRequest, async (req, res) => {
+    console.log('🎯 Validation request received:', JSON.stringify(req.body, null, 2));
+    
+    try {
+        const { serial_number, device_id } = req.body;
+        
+        if (!serial_number || !device_id) {
+            return res.status(400).json({ error: 'Serial number and device ID are required' });
+        }
+        
+        // Check if Google Sheets is available
+        if (!sheets) {
+            console.log('❌ Google Sheets not available, using mock validation');
+            const isValid = serial_number.length > 5;
+            return res.json({
+                valid: isValid,
+                serial_number: serial_number,
+                device_id: device_id,
+                tokens_remaining: isValid ? 1000 : 0,
+                source: 'mock',
+                timestamp: new Date().toISOString()
+            });
+        }
+        
+        try {
+            // Real Google Sheets validation
+            console.log('🔍 Performing real Google Sheets validation...');
+            const userInfo = await findUserInSheet(serial_number);
+            
+            if (!userInfo) {
+                return res.json({
+                    valid: false,
+                    error: 'Serial number not found',
+                    serial_number: serial_number,
+                    device_id: device_id,
+                    tokens_remaining: 0,
+                    source: 'google_sheets',
+                    timestamp: new Date().toISOString()
+                });
+            }
+            
+            return res.json({
+                valid: userInfo.isValid,
+                serial_number: serial_number,
+                device_id: device_id,
+                tokens_remaining: userInfo.currentTokens,
+                row_index: userInfo.rowIndex,
+                source: 'google_sheets',
+                timestamp: new Date().toISOString()
+            });
+            
+        } catch (googleError) {
+            console.error('❌ Google Sheets validation error:', googleError);
+            return res.status(500).json({
+                error: 'Google Sheets validation failed',
+                details: googleError.message,
+                serial_number: serial_number,
+                device_id: device_id,
+                timestamp: new Date().toISOString()
+            });
+        }
+        
+    } catch (error) {
+        console.error('❌ Validation error:', error);
+        res.status(500).json({ 
+            error: 'Validation failed',
+            details: error.message,
+            timestamp: new Date().toISOString()
+        });
+    }
+});
+
 // Error handling middleware
 app.use((error, req, res, next) => {
     console.error('Unhandled error:', error);
@@ -449,6 +738,8 @@ app.listen(PORT, () => {
     console.log('✅ CRITICAL FIX: Using Sheet1 for all operations');
     console.log('✅ CRITICAL FIX: dotenv configuration loaded');
     console.log('✅ Enhanced logging for order search');
+    console.log('✅ NEW FEATURE: Activation tracking (FALSE → TRUE)');
+    console.log('✅ NEW FEATURE: Termination tracking (tokens = 0 → TRUE)');
     console.log('Environment check:');
     console.log('- CLAUDE_API_KEY:', process.env.CLAUDE_API_KEY ? 'Present ✓' : 'Missing ✗');
     console.log('- GOOGLE_PRIVATE_KEY:', process.env.GOOGLE_PRIVATE_KEY ? 'Present ✓' : 'Missing ✗');
