@@ -557,6 +557,53 @@ app.post('/api/claim-tokens', authenticateRequest, async (req, res) => {
                 });
             }
             
+            // CRITICAL FIX: Extract the actual serial number from the Google Sheet row
+            console.log(`✅ STEP 1.5: Order found! Extracting serial number from Google Sheet...`);
+            
+            // Get the sheet data to find the Serial column
+            const response = await sheets.spreadsheets.values.get({
+                spreadsheetId: process.env.GOOGLE_SPREADSHEET_ID,
+                range: 'Sheet1!A:Z',
+            });
+            
+            const rows = response.data.values;
+            const headers = rows[0];
+            
+            // Find Serial column index
+            const serialColumnIndex = headers.findIndex(header => 
+                header && header.toLowerCase().includes('serial')
+            );
+            
+            console.log(`🔍 Serial column found at index: ${serialColumnIndex}`);
+            
+            if (serialColumnIndex === -1) {
+                console.log(`❌ Serial column not found in spreadsheet`);
+                return res.json({
+                    success: false,
+                    error: 'Serial column not found in spreadsheet',
+                    order_number: order_number,
+                    timestamp: new Date().toISOString()
+                });
+            }
+            
+            // Get the actual serial number from the found row
+            const actualSerialNumber = rows[orderInfo.rowIndex][serialColumnIndex];
+            
+            if (!actualSerialNumber || actualSerialNumber.trim() === '') {
+                console.log(`❌ No serial number found in row ${orderInfo.rowIndex + 1} for order ${order_number}`);
+                return res.json({
+                    success: false,
+                    error: 'No serial number found for this order',
+                    order_number: order_number,
+                    timestamp: new Date().toISOString()
+                });
+            }
+            
+            console.log(`✅ STEP 1.5: Found actual serial number: ${actualSerialNumber} for order ${order_number}`);
+            
+            // IMPORTANT: Use the actual serial number from Google Sheet, not the client-provided one
+            const googleSheetSerialNumber = actualSerialNumber.trim();
+            
             // CORRECTED LOGIC: Check if account can be activated
             console.log(`✅ STEP 2: Order found! Checking activation eligibility...`);
             console.log(`Current status - Activated: ${orderInfo.isActivated}, Terminated: ${orderInfo.isTerminated}`);
@@ -568,7 +615,7 @@ app.post('/api/claim-tokens', authenticateRequest, async (req, res) => {
                     success: false,
                     error: 'Order already activated',
                     order_number: order_number,
-                    serial_number: serial_number,
+                    serial_number: googleSheetSerialNumber,
                     device_id: device_id,
                     timestamp: new Date().toISOString()
                 });
@@ -580,7 +627,7 @@ app.post('/api/claim-tokens', authenticateRequest, async (req, res) => {
                     success: false,
                     error: 'Order is terminated and cannot be reactivated',
                     order_number: order_number,
-                    serial_number: serial_number,
+                    serial_number: googleSheetSerialNumber,
                     device_id: device_id,
                     timestamp: new Date().toISOString()
                 });
@@ -590,8 +637,8 @@ app.post('/api/claim-tokens', authenticateRequest, async (req, res) => {
             console.log(`✅ STEP 3: Account eligible for activation! Processing...`);
             
             // Set tokens to exactly 500000 (not add to existing)
-            console.log(`🔄 Setting token balance to 500000 for user ${serial_number}`);
-            const tokenResult = await setUserTokens(serial_number, 500000);
+            console.log(`🔄 Setting token balance to 500000 for user ${googleSheetSerialNumber}`);
+            const tokenResult = await setUserTokens(googleSheetSerialNumber, 500000);
             
             // Set Activated = TRUE
             if (orderInfo.activatedColumnIndex !== -1) {
@@ -606,11 +653,12 @@ app.post('/api/claim-tokens', authenticateRequest, async (req, res) => {
             return res.json({
                 success: true,
                 order_number: order_number,
-                serial_number: serial_number,
+                serial_number: googleSheetSerialNumber,  // Return the actual serial from Google Sheet
                 device_id: device_id,
                 tokens_set: 500000,
                 new_token_balance: 500000,
                 was_activated: true,
+                actual_serial_from_sheet: googleSheetSerialNumber,  // Make it clear where this came from
                 timestamp: new Date().toISOString()
             });
             
@@ -700,10 +748,10 @@ app.post('/api/consume-tokens', authenticateRequest, async (req, res) => {
             console.log(`🔄 STEP 2: Updating tokens in order row from ${orderRowInfo.currentTokens} to ${newTokenValue}`);
             await updateTokensInSheet(orderRowInfo.rowIndex, orderRowInfo.tokenColumnIndex, newTokenValue);
             
-            // CORRECTED: STEP 3: Check if user should be terminated (tokens < 0)
+            // CORRECTED: STEP 3: Check if user should be terminated (tokens <= 0)
             let wasTerminated = false;
-            if (newTokenValue < 0) {
-                console.log(`⚠️ STEP 3: User has ${newTokenValue} tokens (below 0) - terminating account`);
+            if (newTokenValue <= 0) {
+                console.log(`⚠️ STEP 3: User has ${newTokenValue} tokens (below or equal to 0) - terminating account`);
                 
                 if (orderRowInfo.terminatedColumnIndex !== -1) {
                     if (!orderRowInfo.isTerminated) {
@@ -930,19 +978,69 @@ app.post('/api/claude', authenticateRequest, async (req, res) => {
                 console.log('Token usage:', tokenUsage);
                 console.log('Total tokens consumed:', totalTokensConsumed);
                 
-                // Send response in format expected by JUCE client
-                const responsePayload = {
-                    response: responseText,
-                    model: model,
-                    device_id: device_id,
-                    serial_number: serial_number,
-                    status: 'success',
-                    tokens: tokenUsage,
-                    total_tokens_consumed: totalTokensConsumed,
-                    timestamp: new Date().toISOString()
-                };
+                // STEP 3: Automatically consume tokens from user's account
+                console.log(`🔄 STEP 3: Auto-consuming ${totalTokensConsumed} tokens for user ${serial_number}`);
                 
-                res.json(responsePayload);
+                try {
+                    const orderRowInfo = await findOrderRowBySerial(serial_number);
+                    
+                    if (orderRowInfo && orderRowInfo.currentTokens >= totalTokensConsumed) {
+                        const newTokenValue = orderRowInfo.currentTokens - totalTokensConsumed;
+                        console.log(`🔄 Updating tokens from ${orderRowInfo.currentTokens} to ${newTokenValue}`);
+                        
+                        await updateTokensInSheet(orderRowInfo.rowIndex, orderRowInfo.tokenColumnIndex, newTokenValue);
+                        
+                        // Check for termination
+                        let wasTerminated = false;
+                        if (newTokenValue <= 0 && orderRowInfo.terminatedColumnIndex !== -1 && !orderRowInfo.isTerminated) {
+                            console.log(`⚠️ User has ${newTokenValue} tokens - terminating account`);
+                            await updateTerminatedStatus(orderRowInfo.rowIndex, orderRowInfo.terminatedColumnIndex);
+                            wasTerminated = true;
+                        }
+                        
+                        // Send response with updated token info
+                        const responsePayload = {
+                            response: responseText,
+                            model: model,
+                            device_id: device_id,
+                            serial_number: serial_number,
+                            status: 'success',
+                            tokens: tokenUsage,
+                            total_tokens_consumed: totalTokensConsumed,
+                            new_token_balance: newTokenValue,
+                            was_terminated: wasTerminated,
+                            timestamp: new Date().toISOString()
+                        };
+                        
+                        console.log(`✅ Claude API call completed - consumed ${totalTokensConsumed} tokens, new balance: ${newTokenValue}`);
+                        res.json(responsePayload);
+                    } else {
+                        console.log(`❌ Insufficient tokens for API call - required: ${totalTokensConsumed}, available: ${orderRowInfo?.currentTokens || 0}`);
+                        res.status(403).json({
+                            error: 'Insufficient tokens for API call',
+                            required: totalTokensConsumed,
+                            available: orderRowInfo?.currentTokens || 0,
+                            serial_number: serial_number,
+                            timestamp: new Date().toISOString()
+                        });
+                    }
+                } catch (tokenError) {
+                    console.error('❌ Token consumption error:', tokenError);
+                    // Still return Claude response but log the error
+                    const responsePayload = {
+                        response: responseText,
+                        model: model,
+                        device_id: device_id,
+                        serial_number: serial_number,
+                        status: 'success_with_token_error',
+                        tokens: tokenUsage,
+                        total_tokens_consumed: totalTokensConsumed,
+                        token_error: tokenError.message,
+                        timestamp: new Date().toISOString()
+                    };
+                    
+                    res.json(responsePayload);
+                }
                 
             } catch (parseError) {
                 console.error('JSON parse error:', parseError);
