@@ -268,6 +268,120 @@ async function findUserInSheet(serialNumber) {
     }
 }
 
+// Helper function to search for order by order number
+async function findOrderInSheet(orderNumber) {
+    if (!sheets || !process.env.GOOGLE_SPREADSHEET_ID) {
+        throw new Error('Google Sheets not initialized');
+    }
+
+    try {
+        console.log(`Searching for order number: ${orderNumber}`);
+        
+        // Get all data from the sheet - assuming orders are in a different sheet or range
+        // You may need to adjust this based on your actual spreadsheet structure
+        const response = await sheets.spreadsheets.values.get({
+            spreadsheetId: process.env.GOOGLE_SPREADSHEET_ID,
+            range: 'Orders!A:Z', // Adjust range based on your sheet structure
+        });
+
+        const rows = response.data.values;
+        if (!rows || rows.length === 0) {
+            console.log('No order data found in spreadsheet');
+            return null;
+        }
+
+        console.log(`Found ${rows.length} order rows in spreadsheet`);
+        
+        // Find header row to identify columns
+        const headers = rows[0];
+        const orderColumnIndex = headers.findIndex(header => 
+            header && header.toLowerCase().includes('order')
+        );
+        const tokensColumnIndex = headers.findIndex(header => 
+            header && header.toLowerCase().includes('token')
+        );
+
+        if (orderColumnIndex === -1) {
+            throw new Error('Could not find Order column in spreadsheet');
+        }
+
+        // Search for the order number
+        for (let i = 1; i < rows.length; i++) {
+            const row = rows[i];
+            const rowOrderNumber = row[orderColumnIndex];
+            
+            // Handle order numbers with or without # prefix
+            const cleanOrderNumber = orderNumber.replace('#', '');
+            const cleanRowOrderNumber = (rowOrderNumber || '').replace('#', '');
+            
+            if (cleanRowOrderNumber === cleanOrderNumber) {
+                const tokens = tokensColumnIndex !== -1 ? (parseInt(row[tokensColumnIndex]) || 0) : 1000; // Default tokens
+                console.log(`Found order: row ${i + 1}, tokens: ${tokens}`);
+                return {
+                    orderNumber: rowOrderNumber,
+                    tokens: tokens,
+                    rowIndex: i + 1
+                };
+            }
+        }
+
+        console.log('Order number not found in spreadsheet');
+        return null;
+    } catch (error) {
+        console.error('Error searching orders in Google Sheets:', error);
+        throw error;
+    }
+}
+
+// Helper function to add tokens to user account
+async function addTokensToUser(serialNumber, tokensToAdd) {
+    const userInfo = await findUserInSheet(serialNumber);
+    
+    if (!userInfo) {
+        // User doesn't exist, create new entry
+        const headers = await sheets.spreadsheets.values.get({
+            spreadsheetId: process.env.GOOGLE_SPREADSHEET_ID,
+            range: 'Sheet1!1:1',
+        });
+        
+        const headerRow = headers.data.values[0];
+        const serialColumnIndex = headerRow.findIndex(header => 
+            header && header.toLowerCase().includes('serial')
+        );
+        const tokenColumnIndex = headerRow.findIndex(header => 
+            header && header.toLowerCase().includes('token')
+        );
+        
+        // Find next empty row
+        const allData = await sheets.spreadsheets.values.get({
+            spreadsheetId: process.env.GOOGLE_SPREADSHEET_ID,
+            range: 'Sheet1!A:Z',
+        });
+        
+        const nextRow = allData.data.values.length + 1;
+        const serialColumn = String.fromCharCode(65 + serialColumnIndex);
+        const tokenColumn = String.fromCharCode(65 + tokenColumnIndex);
+        
+        // Add new user
+        await sheets.spreadsheets.values.update({
+            spreadsheetId: process.env.GOOGLE_SPREADSHEET_ID,
+            range: `Sheet1!${serialColumn}${nextRow}:${tokenColumn}${nextRow}`,
+            valueInputOption: 'RAW',
+            requestBody: {
+                values: [[serialNumber, tokensToAdd]]
+            }
+        });
+        
+        return { newTokens: tokensToAdd, previousTokens: 0 };
+    } else {
+        // User exists, add to existing tokens
+        const newTokenValue = userInfo.currentTokens + tokensToAdd;
+        await updateTokensInSheet(userInfo.rowIndex, userInfo.tokenColumnIndex, newTokenValue);
+        
+        return { newTokens: newTokenValue, previousTokens: userInfo.currentTokens };
+    }
+}
+
 // Helper function to update tokens in Google Sheets
 async function updateTokensInSheet(rowIndex, columnIndex, newTokenValue) {
     if (!sheets || !process.env.GOOGLE_SPREADSHEET_ID) {
@@ -316,6 +430,82 @@ function authenticateRequest(req, res, next) {
     next();
 }
 
+// NEW: Token claiming endpoint
+app.post('/api/claim-tokens', authenticateRequest, async (req, res) => {
+    console.log('Token claiming request received:', JSON.stringify(req.body, null, 2));
+    
+    try {
+        const { order_number, serial_number, device_id } = req.body;
+        
+        if (!order_number || !serial_number || !device_id) {
+            return res.status(400).json({ 
+                error: 'Order number, serial number, and device ID are required' 
+            });
+        }
+        
+        // Check if Google Sheets is available
+        if (!sheets) {
+            console.log('Google Sheets not available for token claiming');
+            return res.status(500).json({
+                error: 'Token claiming service temporarily unavailable',
+                timestamp: new Date().toISOString()
+            });
+        }
+        
+        try {
+            // Step 1: Search for the order
+            console.log('Searching for order:', order_number);
+            const orderInfo = await findOrderInSheet(order_number);
+            
+            if (!orderInfo) {
+                return res.json({
+                    success: false,
+                    error: 'Order number not found',
+                    order_number: order_number,
+                    timestamp: new Date().toISOString()
+                });
+            }
+            
+            // Step 2: Add tokens to user account
+            console.log(`Adding ${orderInfo.tokens} tokens to user ${serial_number}`);
+            const tokenResult = await addTokensToUser(serial_number, orderInfo.tokens);
+            
+            console.log(`✅ Successfully claimed ${orderInfo.tokens} tokens for order ${order_number}`);
+            
+            return res.json({
+                success: true,
+                order_number: order_number,
+                serial_number: serial_number,
+                device_id: device_id,
+                tokens_claimed: orderInfo.tokens,
+                new_token_balance: tokenResult.newTokens,
+                previous_token_balance: tokenResult.previousTokens,
+                timestamp: new Date().toISOString()
+            });
+            
+        } catch (googleError) {
+            console.error('Google Sheets token claiming error:', googleError);
+            return res.status(500).json({
+                success: false,
+                error: 'Token claiming failed',
+                details: googleError.message,
+                order_number: order_number,
+                serial_number: serial_number,
+                timestamp: new Date().toISOString()
+            });
+        }
+        
+    } catch (error) {
+        console.error('Token claiming error:', error);
+        res.status(500).json({ 
+            success: false,
+            error: 'Token claiming failed',
+            details: error.message,
+            timestamp: new Date().toISOString()
+        });
+    }
+});
+
 // Claude API proxy endpoint - using curl like your working JUCE version
 app.post('/api/claude', authenticateRequest, async (req, res) => {
     console.log('Claude API request received:', JSON.stringify(req.body, null, 2));
@@ -341,7 +531,7 @@ app.post('/api/claude', authenticateRequest, async (req, res) => {
         // Create the request payload exactly like your JUCE version
         const requestPayload = {
             model: model,
-            max_tokens: 3000,
+            max_tokens: 3000, // Increased for complex sequences
             messages: [
                 {
                     role: 'user',
@@ -695,6 +885,7 @@ app.listen(PORT, () => {
     console.log(`Proxy server running on port ${PORT}`);
     console.log('Using curl-based implementation matching JUCE version');
     console.log('✅ JSON validation and repair enabled');
+    console.log('✅ Token claiming endpoint added');
     console.log('Environment check:');
     console.log('- CLAUDE_API_KEY:', process.env.CLAUDE_API_KEY ? 'Present ✓' : 'Missing ✗');
     console.log('- GOOGLE_PRIVATE_KEY:', process.env.GOOGLE_PRIVATE_KEY ? 'Present ✓' : 'Missing ✗');
