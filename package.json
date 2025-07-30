@@ -1,11 +1,11 @@
 {
   "name": "claude-proxy-server",
-  "version": "1.0.1",
-  "description": "Railway server for claude-proxy-server token claiming - FIXED VERSION",
-  "main": "server-fixed.js",
+  "version": "1.0.2",
+  "description": "Railway server for claude-proxy-server token claiming - DEPLOY VERSION WITH ALL FIXES",
+  "main": "server-deploy.js",
   "scripts": {
-    "start": "node server-fixed.js",
-    "dev": "node server-fixed.js"
+    "start": "node server-deploy.js",
+    "dev": "node server-deploy.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
