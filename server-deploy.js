@@ -223,7 +223,83 @@ async function findOrderInSheet(orderNumber) {
     }
 }
 
-// Helper function to find user in Google Sheets (using Sheet1)
+// CORRECTED: Helper function to find user by serial number in ORDER ROWS (not separate user rows)
+async function findOrderRowBySerial(serialNumber) {
+    if (!sheets || !process.env.GOOGLE_SPREADSHEET_ID) {
+        throw new Error('Google Sheets not initialized');
+    }
+
+    try {
+        console.log(`🔍 Searching for serial number in order rows: ${serialNumber}`);
+        
+        const response = await sheets.spreadsheets.values.get({
+            spreadsheetId: process.env.GOOGLE_SPREADSHEET_ID,
+            range: 'Sheet1!A:Z',
+        });
+
+        const rows = response.data.values;
+        if (!rows || rows.length === 0) {
+            console.log('❌ No data found in spreadsheet');
+            return null;
+        }
+
+        console.log(`📊 Found ${rows.length} rows in spreadsheet`);
+        
+        const headers = rows[0];
+        console.log('📋 Headers found:', headers);
+        
+        // Find all relevant columns
+        const serialColumnIndex = headers.findIndex(header => 
+            header && header.toLowerCase().includes('serial')
+        );
+        const tokenColumnIndex = headers.findIndex(header => 
+            header && header.toLowerCase().includes('token')
+        );
+        const activatedColumnIndex = headers.findIndex(header => 
+            header && header.toLowerCase().includes('activated')
+        );
+        const terminatedColumnIndex = headers.findIndex(header => 
+            header && header.toLowerCase().includes('terminated')
+        );
+
+        console.log(`🔍 Column indices - Serial: ${serialColumnIndex}, Token: ${tokenColumnIndex}, Activated: ${activatedColumnIndex}, Terminated: ${terminatedColumnIndex}`);
+
+        if (serialColumnIndex === -1 || tokenColumnIndex === -1) {
+            throw new Error('Could not find Serial or Token columns in spreadsheet');
+        }
+
+        // Search for the serial number in order rows
+        for (let i = 1; i < rows.length; i++) {
+            const row = rows[i];
+            if (row[serialColumnIndex] === serialNumber) {
+                const tokens = parseInt(row[tokenColumnIndex]) || 0;
+                const isActivated = activatedColumnIndex !== -1 ? (row[activatedColumnIndex] === 'TRUE') : false;
+                const isTerminated = terminatedColumnIndex !== -1 ? (row[terminatedColumnIndex] === 'TRUE') : false;
+                
+                console.log(`✅ Found user in order row ${i + 1}: tokens: ${tokens}, activated: ${isActivated}, terminated: ${isTerminated}`);
+                return {
+                    rowIndex: i + 1,
+                    serialColumnIndex: serialColumnIndex,
+                    tokenColumnIndex: tokenColumnIndex,
+                    activatedColumnIndex: activatedColumnIndex,
+                    terminatedColumnIndex: terminatedColumnIndex,
+                    currentTokens: tokens,
+                    isValid: tokens > 0,
+                    isActivated: isActivated,
+                    isTerminated: isTerminated
+                };
+            }
+        }
+
+        console.log('❌ Serial number not found in order rows');
+        return null;
+    } catch (error) {
+        console.error('❌ Error searching order rows:', error);
+        throw error;
+    }
+}
+
+// Helper function to find user in Google Sheets (using Sheet1) - LEGACY FUNCTION
 async function findUserInSheet(serialNumber) {
     if (!sheets || !process.env.GOOGLE_SPREADSHEET_ID) {
         throw new Error('Google Sheets not initialized');
@@ -292,50 +368,50 @@ async function findUserInSheet(serialNumber) {
     }
 }
 
-// CORRECTED: Helper function to set user tokens to exact amount (for activation)
+// CORRECTED: Helper function to set user tokens to exact amount (for activation) - works with ORDER ROWS
 async function setUserTokens(serialNumber, tokenAmount) {
-    const userInfo = await findUserInSheet(serialNumber);
+    // For activation, we need to find the activated order row and update its Token column
+    console.log(`🔍 Looking for order row to set tokens for serial: ${serialNumber}`);
     
-    if (!userInfo) {
-        // User doesn't exist in user tracking - create new entry
-        const headers = await sheets.spreadsheets.values.get({
-            spreadsheetId: process.env.GOOGLE_SPREADSHEET_ID,
-            range: 'Sheet1!1:1',
-        });
+    // This should find the order row that was just activated
+    const orderRowInfo = await findOrderRowBySerial(serialNumber);
+    
+    if (orderRowInfo) {
+        // Order row exists (should be the case during activation)
+        console.log(`🔄 Updating order row from ${orderRowInfo.currentTokens} to ${tokenAmount} tokens`);
+        await updateTokensInSheet(orderRowInfo.rowIndex, orderRowInfo.tokenColumnIndex, tokenAmount);
+        return { newTokens: tokenAmount, previousTokens: orderRowInfo.currentTokens };
+    } else {
+        // Fallback: Try to find any row with this serial number
+        console.log(`⚠️ Order row not found for serial ${serialNumber}, checking if serial exists anywhere...`);
         
-        const headerRow = headers.data.values[0];
-        const serialColumnIndex = headerRow.findIndex(header => 
-            header && header.toLowerCase().includes('serial')
-        );
-        const tokenColumnIndex = headerRow.findIndex(header => 
-            header && header.toLowerCase().includes('token')
-        );
-        
-        const allData = await sheets.spreadsheets.values.get({
+        const response = await sheets.spreadsheets.values.get({
             spreadsheetId: process.env.GOOGLE_SPREADSHEET_ID,
             range: 'Sheet1!A:Z',
         });
+
+        const rows = response.data.values;
+        const headers = rows[0];
         
-        const nextRow = allData.data.values.length + 1;
-        const serialColumn = String.fromCharCode(65 + serialColumnIndex);
-        const tokenColumn = String.fromCharCode(65 + tokenColumnIndex);
+        const serialColumnIndex = headers.findIndex(header => 
+            header && header.toLowerCase().includes('serial')
+        );
+        const tokenColumnIndex = headers.findIndex(header => 
+            header && header.toLowerCase().includes('token')
+        );
         
-        await sheets.spreadsheets.values.update({
-            spreadsheetId: process.env.GOOGLE_SPREADSHEET_ID,
-            range: `Sheet1!${serialColumn}${nextRow}:${tokenColumn}${nextRow}`,
-            valueInputOption: 'RAW',
-            requestBody: {
-                values: [[serialNumber, tokenAmount]]
+        // Look for any row with this serial number
+        for (let i = 1; i < rows.length; i++) {
+            const row = rows[i];
+            if (row[serialColumnIndex] === serialNumber) {
+                console.log(`✅ Found serial in row ${i + 1}, setting tokens to ${tokenAmount}`);
+                await updateTokensInSheet(i + 1, tokenColumnIndex, tokenAmount);
+                return { newTokens: tokenAmount, previousTokens: parseInt(row[tokenColumnIndex]) || 0 };
             }
-        });
+        }
         
-        console.log(`✅ Created new user entry with ${tokenAmount} tokens`);
-        return { newTokens: tokenAmount, previousTokens: 0 };
-    } else {
-        // User exists - set tokens to exact amount (not add)
-        console.log(`🔄 Updating existing user from ${userInfo.currentTokens} to ${tokenAmount} tokens`);
-        await updateTokensInSheet(userInfo.rowIndex, userInfo.tokenColumnIndex, tokenAmount);
-        return { newTokens: tokenAmount, previousTokens: userInfo.currentTokens };
+        console.log(`❌ Could not find serial number ${serialNumber} anywhere in spreadsheet`);
+        throw new Error(`Serial number ${serialNumber} not found in spreadsheet`);
     }
 }
 
@@ -592,25 +668,25 @@ app.post('/api/consume-tokens', authenticateRequest, async (req, res) => {
         }
         
         try {
-            // Real Google Sheets token consumption
-            console.log('🔍 STEP 1: Finding user in spreadsheet...');
-            const userInfo = await findUserInSheet(serial_number);
+            // CORRECTED: Find user by serial number in the ORDER ROW (not separate user rows)
+            console.log('🔍 STEP 1: Finding user serial in order rows...');
+            const orderRowInfo = await findOrderRowBySerial(serial_number);
             
-            if (!userInfo) {
+            if (!orderRowInfo) {
                 return res.status(404).json({
                     success: false,
-                    error: 'Serial number not found',
+                    error: 'Serial number not found in order data',
                     serial_number: serial_number,
                     device_id: device_id,
                     timestamp: new Date().toISOString()
                 });
             }
             
-            if (userInfo.currentTokens < tokens_to_consume) {
+            if (orderRowInfo.currentTokens < tokens_to_consume) {
                 return res.status(400).json({
                     success: false,
                     error: 'Insufficient tokens',
-                    current_tokens: userInfo.currentTokens,
+                    current_tokens: orderRowInfo.currentTokens,
                     requested: tokens_to_consume,
                     serial_number: serial_number,
                     device_id: device_id,
@@ -619,22 +695,20 @@ app.post('/api/consume-tokens', authenticateRequest, async (req, res) => {
             }
             
             // Calculate new token value
-            const newTokenValue = userInfo.currentTokens - tokens_to_consume;
+            const newTokenValue = orderRowInfo.currentTokens - tokens_to_consume;
             
-            console.log(`🔄 STEP 2: Updating tokens from ${userInfo.currentTokens} to ${newTokenValue}`);
-            await updateTokensInSheet(userInfo.rowIndex, userInfo.tokenColumnIndex, newTokenValue);
+            console.log(`🔄 STEP 2: Updating tokens in order row from ${orderRowInfo.currentTokens} to ${newTokenValue}`);
+            await updateTokensInSheet(orderRowInfo.rowIndex, orderRowInfo.tokenColumnIndex, newTokenValue);
             
             // CORRECTED: STEP 3: Check if user should be terminated (tokens < 0)
             let wasTerminated = false;
             if (newTokenValue < 0) {
                 console.log(`⚠️ STEP 3: User has ${newTokenValue} tokens (below 0) - terminating account`);
                 
-                // Find the user again to get termination column info
-                const userWithTerminationInfo = await findUserInSheet(serial_number);
-                if (userWithTerminationInfo && userWithTerminationInfo.terminatedColumnIndex !== -1) {
-                    if (!userWithTerminationInfo.isTerminated) {
+                if (orderRowInfo.terminatedColumnIndex !== -1) {
+                    if (!orderRowInfo.isTerminated) {
                         console.log(`🔄 Setting Terminated = TRUE for user ${serial_number}`);
-                        await updateTerminatedStatus(userWithTerminationInfo.rowIndex, userWithTerminationInfo.terminatedColumnIndex);
+                        await updateTerminatedStatus(orderRowInfo.rowIndex, orderRowInfo.terminatedColumnIndex);
                         wasTerminated = true;
                     } else {
                         console.log(`⚠️ User ${serial_number} is already terminated`);
@@ -650,7 +724,7 @@ app.post('/api/consume-tokens', authenticateRequest, async (req, res) => {
                 success: true,
                 new_tokens: newTokenValue,
                 consumed: tokens_to_consume,
-                previous_tokens: userInfo.currentTokens,
+                previous_tokens: orderRowInfo.currentTokens,
                 serial_number: serial_number,
                 device_id: device_id,
                 was_terminated: wasTerminated,
@@ -712,9 +786,9 @@ app.post('/api/claude', authenticateRequest, async (req, res) => {
         }
         
         try {
-            const userInfo = await findUserInSheet(serial_number);
+            const orderRowInfo = await findOrderRowBySerial(serial_number);
             
-            if (!userInfo) {
+            if (!orderRowInfo) {
                 console.log(`❌ Serial number ${serial_number} not found - blocking API access`);
                 return res.status(403).json({
                     error: 'Account not found - API access denied',
@@ -724,7 +798,7 @@ app.post('/api/claude', authenticateRequest, async (req, res) => {
             }
             
             // Check if account is terminated
-            if (userInfo.isTerminated) {
+            if (orderRowInfo.isTerminated) {
                 console.log(`❌ Account ${serial_number} is terminated - blocking API access`);
                 return res.status(403).json({
                     error: 'Account is terminated - API access denied',
@@ -734,17 +808,17 @@ app.post('/api/claude', authenticateRequest, async (req, res) => {
             }
             
             // Check if account has sufficient tokens
-            if (userInfo.currentTokens <= 0) {
-                console.log(`❌ Account ${serial_number} has ${userInfo.currentTokens} tokens - blocking API access`);
+            if (orderRowInfo.currentTokens <= 0) {
+                console.log(`❌ Account ${serial_number} has ${orderRowInfo.currentTokens} tokens - blocking API access`);
                 return res.status(403).json({
                     error: 'Insufficient tokens - API access denied',
-                    current_tokens: userInfo.currentTokens,
+                    current_tokens: orderRowInfo.currentTokens,
                     serial_number: serial_number,
                     timestamp: new Date().toISOString()
                 });
             }
             
-            console.log(`✅ Account ${serial_number} validated - tokens: ${userInfo.currentTokens}, allowing API access`);
+            console.log(`✅ Account ${serial_number} validated - tokens: ${orderRowInfo.currentTokens}, allowing API access`);
             
         } catch (validationError) {
             console.error('❌ Account validation failed:', validationError);
@@ -919,9 +993,9 @@ app.post('/api/validate', authenticateRequest, async (req, res) => {
         try {
             // Real Google Sheets validation
             console.log('🔍 Performing real Google Sheets validation...');
-            const userInfo = await findUserInSheet(serial_number);
+            const orderRowInfo = await findOrderRowBySerial(serial_number);
             
-            if (!userInfo) {
+            if (!orderRowInfo) {
                 return res.json({
                     valid: false,
                     error: 'Serial number not found',
@@ -934,15 +1008,15 @@ app.post('/api/validate', authenticateRequest, async (req, res) => {
             }
             
             // CORRECTED: Account is valid only if activated AND not terminated AND has tokens > 0
-            const isAccountActive = !userInfo.isTerminated && userInfo.currentTokens > 0;
+            const isAccountActive = !orderRowInfo.isTerminated && orderRowInfo.currentTokens > 0;
             
             return res.json({
                 valid: isAccountActive,
                 serial_number: serial_number,
                 device_id: device_id,
-                tokens_remaining: userInfo.currentTokens,
-                is_terminated: userInfo.isTerminated,
-                row_index: userInfo.rowIndex,
+                tokens_remaining: orderRowInfo.currentTokens,
+                is_terminated: orderRowInfo.isTerminated,
+                row_index: orderRowInfo.rowIndex,
                 source: 'google_sheets',
                 timestamp: new Date().toISOString()
             });
