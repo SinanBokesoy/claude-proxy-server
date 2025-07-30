@@ -2,7 +2,6 @@ const express = require('express');
 const { exec } = require('child_process');
 const cors = require('cors');
 const { google } = require('googleapis');
-require('dotenv').config(); // Load environment variables
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -90,7 +89,120 @@ async function initializeGoogleSheets() {
 // Initialize Google Sheets on startup
 initializeGoogleSheets();
 
-// Root endpoint 
+// JSON validation and repair functions
+function isValidJson(str) {
+    try {
+        JSON.parse(str);
+        return true;
+    } catch (error) {
+        return false;
+    }
+}
+
+function extractJsonFromResponse(text) {
+    // Remove markdown code blocks
+    let cleaned = text.replace(/```json\s*/g, '').replace(/```\s*$/g, '');
+    
+    // Find first { and attempt to find matching }
+    const startIndex = cleaned.indexOf('{');
+    if (startIndex === -1) return null;
+    
+    // Try to find the complete JSON by counting braces
+    let braceCount = 0;
+    let endIndex = -1;
+    
+    for (let i = startIndex; i < cleaned.length; i++) {
+        if (cleaned[i] === '{') {
+            braceCount++;
+        } else if (cleaned[i] === '}') {
+            braceCount--;
+            if (braceCount === 0) {
+                endIndex = i;
+                break;
+            }
+        }
+    }
+    
+    if (endIndex !== -1) {
+        return cleaned.substring(startIndex, endIndex + 1);
+    }
+    
+    return null;
+}
+
+function repairTruncatedJson(jsonStr) {
+    if (!jsonStr || !jsonStr.startsWith('{')) {
+        return null;
+    }
+    
+    console.log('Attempting to repair truncated JSON...');
+    
+    // Count unmatched brackets and braces
+    let openBraces = 0;
+    let openBrackets = 0;
+    let inString = false;
+    let escaped = false;
+    
+    for (let i = 0; i < jsonStr.length; i++) {
+        const char = jsonStr[i];
+        
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        
+        if (char === '\\') {
+            escaped = true;
+            continue;
+        }
+        
+        if (char === '"') {
+            inString = !inString;
+            continue;
+        }
+        
+        if (!inString) {
+            if (char === '{') {
+                openBraces++;
+            } else if (char === '}') {
+                openBraces--;
+            } else if (char === '[') {
+                openBrackets++;
+            } else if (char === ']') {
+                openBrackets--;
+            }
+        }
+    }
+    
+    // If we have unmatched brackets/braces, try to close them
+    if (openBraces > 0 || openBrackets > 0) {
+        let repaired = jsonStr;
+        
+        // Add missing closing brackets
+        for (let i = 0; i < openBrackets; i++) {
+            repaired += '\n  ]';
+        }
+        
+        // Add missing closing braces
+        for (let i = 0; i < openBraces; i++) {
+            repaired += '\n}';
+        }
+        
+        console.log(`Added ${openBrackets} closing brackets and ${openBraces} closing braces`);
+        
+        // Test if the repaired JSON is valid
+        if (isValidJson(repaired)) {
+            console.log('✅ Successfully repaired truncated JSON');
+            return repaired;
+        } else {
+            console.log('❌ Could not repair JSON - still invalid after adding closers');
+        }
+    }
+    
+    return null;
+}
+
+// Root endpoint for Railway deployment verification
 app.get('/', (req, res) => {
     res.json({
         message: 'Fundamental4 Railway Server',
@@ -261,7 +373,7 @@ async function findOrderInSheet(orderNumber) {
     }
 }
 
-// Rest of the functions remain the same...
+// Helper function to add tokens to user account
 async function addTokensToUser(serialNumber, tokensToAdd) {
     const userInfo = await findUserInSheet(serialNumber);
     
@@ -310,6 +422,7 @@ async function addTokensToUser(serialNumber, tokensToAdd) {
     }
 }
 
+// Helper function to update tokens in Google Sheets
 async function updateTokensInSheet(rowIndex, columnIndex, newTokenValue) {
     if (!sheets || !process.env.GOOGLE_SPREADSHEET_ID) {
         throw new Error('Google Sheets not initialized');
@@ -343,6 +456,7 @@ function authenticateRequest(req, res, next) {
     const userAgent = req.headers['user-agent'];
     const contentType = req.headers['content-type'];
     
+    // Basic client validation
     if (!userAgent || !userAgent.includes('SecureJUCEClient')) {
         console.log('⚠️ Unauthorized request - invalid user agent:', userAgent);
         return res.status(403).json({ error: 'Unauthorized client' });
@@ -356,7 +470,7 @@ function authenticateRequest(req, res, next) {
     next();
 }
 
-// Token claiming endpoint - FIXED VERSION
+// NEW: Token claiming endpoint
 app.post('/api/claim-tokens', authenticateRequest, async (req, res) => {
     console.log('Token claiming request received:', JSON.stringify(req.body, null, 2));
     
@@ -432,119 +546,6 @@ app.post('/api/claim-tokens', authenticateRequest, async (req, res) => {
     }
 });
 
-// JSON validation and repair functions
-function isValidJson(str) {
-    try {
-        JSON.parse(str);
-        return true;
-    } catch (error) {
-        return false;
-    }
-}
-
-function extractJsonFromResponse(text) {
-    // Remove markdown code blocks
-    let cleaned = text.replace(/```json\s*/g, '').replace(/```\s*$/g, '');
-    
-    // Find first { and attempt to find matching }
-    const startIndex = cleaned.indexOf('{');
-    if (startIndex === -1) return null;
-    
-    // Try to find the complete JSON by counting braces
-    let braceCount = 0;
-    let endIndex = -1;
-    
-    for (let i = startIndex; i < cleaned.length; i++) {
-        if (cleaned[i] === '{') {
-            braceCount++;
-        } else if (cleaned[i] === '}') {
-            braceCount--;
-            if (braceCount === 0) {
-                endIndex = i;
-                break;
-            }
-        }
-    }
-    
-    if (endIndex !== -1) {
-        return cleaned.substring(startIndex, endIndex + 1);
-    }
-    
-    return null;
-}
-
-function repairTruncatedJson(jsonStr) {
-    if (!jsonStr || !jsonStr.startsWith('{')) {
-        return null;
-    }
-    
-    console.log('Attempting to repair truncated JSON...');
-    
-    // Count unmatched brackets and braces
-    let openBraces = 0;
-    let openBrackets = 0;
-    let inString = false;
-    let escaped = false;
-    
-    for (let i = 0; i < jsonStr.length; i++) {
-        const char = jsonStr[i];
-        
-        if (escaped) {
-            escaped = false;
-            continue;
-        }
-        
-        if (char === '\\') {
-            escaped = true;
-            continue;
-        }
-        
-        if (char === '"') {
-            inString = !inString;
-            continue;
-        }
-        
-        if (!inString) {
-            if (char === '{') {
-                openBraces++;
-            } else if (char === '}') {
-                openBraces--;
-            } else if (char === '[') {
-                openBrackets++;
-            } else if (char === ']') {
-                openBrackets--;
-            }
-        }
-    }
-    
-    // If we have unmatched brackets/braces, try to close them
-    if (openBraces > 0 || openBrackets > 0) {
-        let repaired = jsonStr;
-        
-        // Add missing closing brackets
-        for (let i = 0; i < openBrackets; i++) {
-            repaired += '\n  ]';
-        }
-        
-        // Add missing closing braces
-        for (let i = 0; i < openBraces; i++) {
-            repaired += '\n}';
-        }
-        
-        console.log(`Added ${openBrackets} closing brackets and ${openBraces} closing braces`);
-        
-        // Test if the repaired JSON is valid
-        if (isValidJson(repaired)) {
-            console.log('✅ Successfully repaired truncated JSON');
-            return repaired;
-        } else {
-            console.log('❌ Could not repair JSON - still invalid after adding closers');
-        }
-    }
-    
-    return null;
-}
-
 // Claude API proxy endpoint - using curl like your working JUCE version
 app.post('/api/claude', authenticateRequest, async (req, res) => {
     console.log('Claude API request received:', JSON.stringify(req.body, null, 2));
@@ -562,11 +563,15 @@ app.post('/api/claude', authenticateRequest, async (req, res) => {
         }
         
         console.log('Making request to Claude API using curl (matching JUCE implementation)...');
+        console.log('API Key present:', !!process.env.CLAUDE_API_KEY);
+        console.log('API Key prefix:', process.env.CLAUDE_API_KEY ? process.env.CLAUDE_API_KEY.substring(0, 15) + '...' : 'undefined');
+        console.log('Using model:', model);
+        console.log('Message length:', message.length);
         
         // Create the request payload exactly like your JUCE version
         const requestPayload = {
             model: model,
-            max_tokens: 2500,
+            max_tokens: 2500, // Increased for complex sequences
             messages: [
                 {
                     role: 'user',
@@ -576,6 +581,7 @@ app.post('/api/claude', authenticateRequest, async (req, res) => {
         };
         
         const jsonString = JSON.stringify(requestPayload);
+        console.log('Request payload:', jsonString);
         
         // Use curl command exactly like your working JUCE version
         const curlCommand = `curl -s -w "\\n%{http_code}" -X POST https://api.anthropic.com/v1/messages ` +
@@ -587,21 +593,33 @@ app.post('/api/claude', authenticateRequest, async (req, res) => {
                            `-H "anthropic-beta: prompt-caching-2024-07-31" ` +
                            `-d '${jsonString.replace(/'/g, "'\\''")}'`;
         
+        console.log('Executing curl command...');
+        console.log('Command length:', curlCommand.length);
+        
         // Execute curl command
         exec(curlCommand, { timeout: 30000 }, (error, stdout, stderr) => {
             if (error) {
                 console.error('Curl execution error:', error);
+                console.error('Stderr:', stderr);
                 return res.status(500).json({
                     error: 'Failed to execute curl command',
                     details: error.message,
+                    stderr: stderr,
                     timestamp: new Date().toISOString()
                 });
             }
+            
+            console.log('Curl stdout:', stdout);
+            console.log('Curl stderr:', stderr);
             
             // Parse response (last line should be HTTP status code)
             const lines = stdout.trim().split('\n');
             const statusCode = parseInt(lines[lines.length - 1]);
             const responseBody = lines.slice(0, -1).join('\n');
+            
+            console.log('HTTP Status Code:', statusCode);
+            console.log('Response body length:', responseBody.length);
+            console.log('Response body:', responseBody.substring(0, 500) + '...');
             
             if (statusCode !== 200) {
                 console.error('Non-200 status code:', statusCode);
@@ -626,8 +644,9 @@ app.post('/api/claude', authenticateRequest, async (req, res) => {
             try {
                 // Parse the JSON response
                 const responseData = JSON.parse(responseBody);
+                console.log('Parsed response data:', JSON.stringify(responseData, null, 2));
                 
-                // Extract the response content
+                // Extract the response content - matching your JUCE parsing
                 let responseText = '';
                 if (responseData && responseData.content && Array.isArray(responseData.content)) {
                     responseText = responseData.content
@@ -639,23 +658,37 @@ app.post('/api/claude', authenticateRequest, async (req, res) => {
                 if (!responseText) {
                     responseText = 'No response content received';
                 }
+                
+                console.log('Extracted response text length:', responseText.length);
+                console.log('Response text preview:', responseText.substring(0, 200) + '...');
 
-                // Validate and repair JSON before sending to client
+                // NEW: Validate and repair JSON before sending to client
                 let finalResponseText = responseText;
                 const extractedJson = extractJsonFromResponse(responseText);
 
                 if (extractedJson) {
+                    console.log('Found JSON in response, length:', extractedJson.length);
+                    
                     if (isValidJson(extractedJson)) {
+                        console.log('✅ JSON is valid');
                         finalResponseText = extractedJson;
                     } else {
+                        console.log('❌ JSON is invalid, attempting repair...');
                         const repairedJson = repairTruncatedJson(extractedJson);
+                        
                         if (repairedJson) {
+                            console.log('✅ Successfully repaired JSON');
                             finalResponseText = repairedJson;
+                        } else {
+                            console.log('❌ Could not repair JSON, sending original response');
+                            // Keep original response
                         }
                     }
+                } else {
+                    console.log('No JSON found in response, sending as-is');
                 }
                 
-                // Calculate token usage
+                // Calculate token usage if available
                 let tokenUsage = {
                     input: responseData.usage?.input_tokens || 0,
                     output: responseData.usage?.output_tokens || 0,
@@ -663,12 +696,16 @@ app.post('/api/claude', authenticateRequest, async (req, res) => {
                     cache_read: responseData.usage?.cache_read_input_tokens || 0
                 };
                 
+                // Calculate total tokens consumed (matching your JUCE calculation)
                 const totalTokensConsumed = tokenUsage.input + tokenUsage.output + 
                                           tokenUsage.cache_creation + tokenUsage.cache_read;
                 
+                console.log('Token usage:', tokenUsage);
+                console.log('Total tokens consumed:', totalTokensConsumed);
+                
                 // Send response in format expected by your JUCE client
                 const responsePayload = {
-                    response: finalResponseText,
+                    response: finalResponseText, // Use validated/repaired JSON
                     model: model,
                     device_id: device_id,
                     status: 'success',
@@ -681,6 +718,7 @@ app.post('/api/claude', authenticateRequest, async (req, res) => {
                 
             } catch (parseError) {
                 console.error('JSON parse error:', parseError);
+                console.error('Raw response body:', responseBody);
                 res.status(500).json({
                     error: 'Failed to parse Claude API response',
                     details: parseError.message,
@@ -884,7 +922,10 @@ app.use((error, req, res, next) => {
 
 // Start server
 app.listen(PORT, () => {
-    console.log(`Fixed proxy server running on port ${PORT}`);
+    console.log(`Proxy server running on port ${PORT}`);
+    console.log('Using curl-based implementation matching JUCE version');
+    console.log('✅ JSON validation and repair enabled');
+    console.log('✅ Token claiming endpoint added');
     console.log('✅ FIXED: Google Sheets JWT authentication format');
     console.log('✅ FIXED: Using Sheet1 instead of Orders sheet');
     console.log('Environment check:');
@@ -892,5 +933,7 @@ app.listen(PORT, () => {
     console.log('- GOOGLE_PRIVATE_KEY:', process.env.GOOGLE_PRIVATE_KEY ? 'Present ✓' : 'Missing ✗');
     console.log('- GOOGLE_CLIENT_EMAIL:', process.env.GOOGLE_CLIENT_EMAIL ? 'Present ✓' : 'Missing ✗');
     console.log('- GOOGLE_SPREADSHEET_ID:', process.env.GOOGLE_SPREADSHEET_ID ? 'Present ✓' : 'Missing ✗');
+    console.log('- Node.js version:', process.version);
+    console.log('- Platform:', process.platform);
     console.log('\nServer ready to handle requests...');
 });
