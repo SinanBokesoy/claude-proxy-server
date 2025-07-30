@@ -292,11 +292,12 @@ async function findUserInSheet(serialNumber) {
     }
 }
 
-// Helper function to add tokens to user account
-async function addTokensToUser(serialNumber, tokensToAdd) {
+// CORRECTED: Helper function to set user tokens to exact amount (for activation)
+async function setUserTokens(serialNumber, tokenAmount) {
     const userInfo = await findUserInSheet(serialNumber);
     
     if (!userInfo) {
+        // User doesn't exist in user tracking - create new entry
         const headers = await sheets.spreadsheets.values.get({
             spreadsheetId: process.env.GOOGLE_SPREADSHEET_ID,
             range: 'Sheet1!1:1',
@@ -324,15 +325,17 @@ async function addTokensToUser(serialNumber, tokensToAdd) {
             range: `Sheet1!${serialColumn}${nextRow}:${tokenColumn}${nextRow}`,
             valueInputOption: 'RAW',
             requestBody: {
-                values: [[serialNumber, tokensToAdd]]
+                values: [[serialNumber, tokenAmount]]
             }
         });
         
-        return { newTokens: tokensToAdd, previousTokens: 0 };
+        console.log(`✅ Created new user entry with ${tokenAmount} tokens`);
+        return { newTokens: tokenAmount, previousTokens: 0 };
     } else {
-        const newTokenValue = userInfo.currentTokens + tokensToAdd;
-        await updateTokensInSheet(userInfo.rowIndex, userInfo.tokenColumnIndex, newTokenValue);
-        return { newTokens: newTokenValue, previousTokens: userInfo.currentTokens };
+        // User exists - set tokens to exact amount (not add)
+        console.log(`🔄 Updating existing user from ${userInfo.currentTokens} to ${tokenAmount} tokens`);
+        await updateTokensInSheet(userInfo.rowIndex, userInfo.tokenColumnIndex, tokenAmount);
+        return { newTokens: tokenAmount, previousTokens: userInfo.currentTokens };
     }
 }
 
@@ -478,30 +481,60 @@ app.post('/api/claim-tokens', authenticateRequest, async (req, res) => {
                 });
             }
             
-            console.log(`✅ STEP 2: Order found! Adding ${orderInfo.tokens} tokens to user ${serial_number}`);
-            const tokenResult = await addTokensToUser(serial_number, orderInfo.tokens);
+            // CORRECTED LOGIC: Check if account can be activated
+            console.log(`✅ STEP 2: Order found! Checking activation eligibility...`);
+            console.log(`Current status - Activated: ${orderInfo.isActivated}, Terminated: ${orderInfo.isTerminated}`);
             
-            // NEW: STEP 3: Update Activated column to TRUE (if not already activated)
-            if (!orderInfo.isActivated && orderInfo.activatedColumnIndex !== -1) {
-                console.log(`🔄 STEP 3: Setting Activated = TRUE for order ${order_number}`);
+            // Check if account is eligible for activation
+            if (orderInfo.isActivated) {
+                console.log(`❌ Order ${order_number} is already activated - cannot reactivate`);
+                return res.json({
+                    success: false,
+                    error: 'Order already activated',
+                    order_number: order_number,
+                    serial_number: serial_number,
+                    device_id: device_id,
+                    timestamp: new Date().toISOString()
+                });
+            }
+            
+            if (orderInfo.isTerminated) {
+                console.log(`❌ Order ${order_number} is terminated - cannot reactivate`);
+                return res.json({
+                    success: false,
+                    error: 'Order is terminated and cannot be reactivated',
+                    order_number: order_number,
+                    serial_number: serial_number,
+                    device_id: device_id,
+                    timestamp: new Date().toISOString()
+                });
+            }
+            
+            // Account is eligible (Activated=FALSE AND Terminated=FALSE)
+            console.log(`✅ STEP 3: Account eligible for activation! Processing...`);
+            
+            // Set tokens to exactly 500000 (not add to existing)
+            console.log(`🔄 Setting token balance to 500000 for user ${serial_number}`);
+            const tokenResult = await setUserTokens(serial_number, 500000);
+            
+            // Set Activated = TRUE
+            if (orderInfo.activatedColumnIndex !== -1) {
+                console.log(`🔄 STEP 4: Setting Activated = TRUE for order ${order_number}`);
                 await updateActivatedStatus(orderInfo.rowIndex, orderInfo.activatedColumnIndex);
-            } else if (orderInfo.isActivated) {
-                console.log(`⚠️ Order ${order_number} is already activated`);
             } else {
                 console.log(`⚠️ Activated column not found - cannot update activation status`);
             }
             
-            console.log(`🎉 SUCCESS! Claimed ${orderInfo.tokens} tokens for order ${order_number}`);
+            console.log(`🎉 SUCCESS! Account activated with 500000 tokens for order ${order_number}`);
             
             return res.json({
                 success: true,
                 order_number: order_number,
                 serial_number: serial_number,
                 device_id: device_id,
-                tokens_claimed: orderInfo.tokens,
-                new_token_balance: tokenResult.newTokens,
-                previous_token_balance: tokenResult.previousTokens,
-                was_activated: !orderInfo.isActivated,
+                tokens_set: 500000,
+                new_token_balance: 500000,
+                was_activated: true,
                 timestamp: new Date().toISOString()
             });
             
@@ -591,10 +624,10 @@ app.post('/api/consume-tokens', authenticateRequest, async (req, res) => {
             console.log(`🔄 STEP 2: Updating tokens from ${userInfo.currentTokens} to ${newTokenValue}`);
             await updateTokensInSheet(userInfo.rowIndex, userInfo.tokenColumnIndex, newTokenValue);
             
-            // NEW: STEP 3: Check if user should be terminated (tokens = 0)
+            // CORRECTED: STEP 3: Check if user should be terminated (tokens < 0)
             let wasTerminated = false;
-            if (newTokenValue === 0) {
-                console.log(`⚠️ STEP 3: User has 0 tokens - checking termination status`);
+            if (newTokenValue < 0) {
+                console.log(`⚠️ STEP 3: User has ${newTokenValue} tokens (below 0) - terminating account`);
                 
                 // Find the user again to get termination column info
                 const userWithTerminationInfo = await findUserInSheet(serial_number);
@@ -648,6 +681,216 @@ app.post('/api/consume-tokens', authenticateRequest, async (req, res) => {
     }
 });
 
+// Claude API proxy endpoint with account validation
+app.post('/api/claude', authenticateRequest, async (req, res) => {
+    console.log('🎯 Claude API request received:', JSON.stringify(req.body, null, 2));
+    
+    try {
+        const { message, model = 'claude-sonnet-4-20250514', device_id, serial_number } = req.body;
+        
+        if (!message) {
+            return res.status(400).json({ error: 'Message is required' });
+        }
+        
+        if (!serial_number) {
+            return res.status(400).json({ error: 'Serial number is required for API access validation' });
+        }
+        
+        if (!process.env.CLAUDE_API_KEY) {
+            console.error('CLAUDE_API_KEY environment variable not set');
+            return res.status(500).json({ error: 'Server configuration error: API key not configured' });
+        }
+        
+        // CRITICAL: Validate account before allowing Claude API access
+        console.log('🔍 STEP 1: Validating account access...');
+        if (!sheets) {
+            console.log('❌ Google Sheets not available - blocking Claude API access');
+            return res.status(500).json({
+                error: 'Account validation service unavailable - API access denied',
+                timestamp: new Date().toISOString()
+            });
+        }
+        
+        try {
+            const userInfo = await findUserInSheet(serial_number);
+            
+            if (!userInfo) {
+                console.log(`❌ Serial number ${serial_number} not found - blocking API access`);
+                return res.status(403).json({
+                    error: 'Account not found - API access denied',
+                    serial_number: serial_number,
+                    timestamp: new Date().toISOString()
+                });
+            }
+            
+            // Check if account is terminated
+            if (userInfo.isTerminated) {
+                console.log(`❌ Account ${serial_number} is terminated - blocking API access`);
+                return res.status(403).json({
+                    error: 'Account is terminated - API access denied',
+                    serial_number: serial_number,
+                    timestamp: new Date().toISOString()
+                });
+            }
+            
+            // Check if account has sufficient tokens
+            if (userInfo.currentTokens <= 0) {
+                console.log(`❌ Account ${serial_number} has ${userInfo.currentTokens} tokens - blocking API access`);
+                return res.status(403).json({
+                    error: 'Insufficient tokens - API access denied',
+                    current_tokens: userInfo.currentTokens,
+                    serial_number: serial_number,
+                    timestamp: new Date().toISOString()
+                });
+            }
+            
+            console.log(`✅ Account ${serial_number} validated - tokens: ${userInfo.currentTokens}, allowing API access`);
+            
+        } catch (validationError) {
+            console.error('❌ Account validation failed:', validationError);
+            return res.status(500).json({
+                error: 'Account validation failed - API access denied',
+                details: validationError.message,
+                timestamp: new Date().toISOString()
+            });
+        }
+        
+        console.log('🔄 STEP 2: Making request to Claude API...');
+        console.log('API Key present:', !!process.env.CLAUDE_API_KEY);
+        console.log('Using model:', model);
+        console.log('Message length:', message.length);
+        
+        // Create the request payload
+        const requestPayload = {
+            model: model,
+            max_tokens: 2500,
+            messages: [
+                {
+                    role: 'user',
+                    content: message
+                }
+            ]
+        };
+        
+        const jsonString = JSON.stringify(requestPayload);
+        
+        // Use curl command to call Claude API
+        const curlCommand = `curl -s -w "\\n%{http_code}" -X POST https://api.anthropic.com/v1/messages ` +
+                           `--pinnedpubkey "sha256//vFoVs93Ln0mJL+OlkOg4+rUNLaBZ/lCPnOPlNkU2L7w=" ` +
+                           `--ssl-reqd --tlsv1.2 ` +
+                           `-H "Content-Type: application/json" ` +
+                           `-H "x-api-key: ${process.env.CLAUDE_API_KEY}" ` +
+                           `-H "anthropic-version: 2023-06-01" ` +
+                           `-H "anthropic-beta: prompt-caching-2024-07-31" ` +
+                           `-d '${jsonString.replace(/'/g, "'\\''")}'`;
+        
+        console.log('Executing curl command...');
+        
+        // Execute curl command
+        exec(curlCommand, { timeout: 30000 }, (error, stdout, stderr) => {
+            if (error) {
+                console.error('Curl execution error:', error);
+                return res.status(500).json({
+                    error: 'Failed to execute curl command',
+                    details: error.message,
+                    timestamp: new Date().toISOString()
+                });
+            }
+            
+            // Parse response (last line should be HTTP status code)
+            const lines = stdout.trim().split('\n');
+            const statusCode = parseInt(lines[lines.length - 1]);
+            const responseBody = lines.slice(0, -1).join('\n');
+            
+            console.log('HTTP Status Code:', statusCode);
+            console.log('Response body length:', responseBody.length);
+            
+            if (statusCode !== 200) {
+                console.error('Non-200 status code:', statusCode);
+                try {
+                    const errorData = JSON.parse(responseBody);
+                    return res.status(500).json({
+                        error: 'Claude API request failed',
+                        details: errorData,
+                        status: statusCode,
+                        timestamp: new Date().toISOString()
+                    });
+                } catch (parseError) {
+                    return res.status(500).json({
+                        error: 'Claude API request failed',
+                        details: responseBody,
+                        status: statusCode,
+                        timestamp: new Date().toISOString()
+                    });
+                }
+            }
+            
+            try {
+                // Parse the JSON response
+                const responseData = JSON.parse(responseBody);
+                
+                // Extract the response content
+                let responseText = '';
+                if (responseData && responseData.content && Array.isArray(responseData.content)) {
+                    responseText = responseData.content
+                        .filter(item => item.type === 'text')
+                        .map(item => item.text)
+                        .join('');
+                }
+                
+                if (!responseText) {
+                    responseText = 'No response content received';
+                }
+                
+                // Calculate token usage
+                let tokenUsage = {
+                    input: responseData.usage?.input_tokens || 0,
+                    output: responseData.usage?.output_tokens || 0,
+                    cache_creation: responseData.usage?.cache_creation_input_tokens || 0,
+                    cache_read: responseData.usage?.cache_read_input_tokens || 0
+                };
+                
+                const totalTokensConsumed = tokenUsage.input + tokenUsage.output + 
+                                          tokenUsage.cache_creation + tokenUsage.cache_read;
+                
+                console.log('Token usage:', tokenUsage);
+                console.log('Total tokens consumed:', totalTokensConsumed);
+                
+                // Send response in format expected by JUCE client
+                const responsePayload = {
+                    response: responseText,
+                    model: model,
+                    device_id: device_id,
+                    serial_number: serial_number,
+                    status: 'success',
+                    tokens: tokenUsage,
+                    total_tokens_consumed: totalTokensConsumed,
+                    timestamp: new Date().toISOString()
+                };
+                
+                res.json(responsePayload);
+                
+            } catch (parseError) {
+                console.error('JSON parse error:', parseError);
+                res.status(500).json({
+                    error: 'Failed to parse Claude API response',
+                    details: parseError.message,
+                    rawResponse: responseBody,
+                    timestamp: new Date().toISOString()
+                });
+            }
+        });
+        
+    } catch (error) {
+        console.error('Request processing error:', error);
+        res.status(500).json({
+            error: 'Request processing failed',
+            details: error.message,
+            timestamp: new Date().toISOString()
+        });
+    }
+});
+
 // Google Sheets validation endpoint  
 app.post('/api/validate', authenticateRequest, async (req, res) => {
     console.log('🎯 Validation request received:', JSON.stringify(req.body, null, 2));
@@ -690,11 +933,15 @@ app.post('/api/validate', authenticateRequest, async (req, res) => {
                 });
             }
             
+            // CORRECTED: Account is valid only if activated AND not terminated AND has tokens > 0
+            const isAccountActive = !userInfo.isTerminated && userInfo.currentTokens > 0;
+            
             return res.json({
-                valid: userInfo.isValid,
+                valid: isAccountActive,
                 serial_number: serial_number,
                 device_id: device_id,
                 tokens_remaining: userInfo.currentTokens,
+                is_terminated: userInfo.isTerminated,
                 row_index: userInfo.rowIndex,
                 source: 'google_sheets',
                 timestamp: new Date().toISOString()
