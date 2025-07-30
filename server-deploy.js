@@ -636,9 +636,13 @@ app.post('/api/claim-tokens', authenticateRequest, async (req, res) => {
             // Account is eligible (Activated=FALSE AND Terminated=FALSE)
             console.log(`✅ STEP 3: Account eligible for activation! Processing...`);
             
-            // Set tokens to exactly 500000 (not add to existing)
-            console.log(`🔄 Setting token balance to 500000 for user ${googleSheetSerialNumber}`);
-            const tokenResult = await setUserTokens(googleSheetSerialNumber, 500000);
+            // DIRECT FIX: Set tokens directly using the order row we already found
+            console.log(`🔄 Setting token balance to 500000 directly in row ${orderInfo.rowIndex} (Google Sheets row number)`);
+            
+            // Update tokens directly in the order row we already have
+            // Note: orderInfo.rowIndex is already 1-based (Google Sheets row number)
+            await updateTokensInSheet(orderInfo.rowIndex, orderInfo.tokensColumnIndex, 500000);
+            console.log(`✅ Successfully set 500000 tokens for serial ${googleSheetSerialNumber} in row ${orderInfo.rowIndex}`);
             
             // Set Activated = TRUE
             if (orderInfo.activatedColumnIndex !== -1) {
