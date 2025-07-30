@@ -1,20 +1,18 @@
 {
-  "name": "fundamental4-server",
-  "version": "1.0.0",
-  "description": "Railway server for Fundamental4 token claiming",
-  "main": "server-updated.js",
-  "scripts": {
-    "start": "node server-updated.js",
-    "dev": "node server-updated.js"
-  },
-  "dependencies": {
-    "express": "^4.18.2",
-    "cors": "^2.8.5",
-    "googleapis": "^154.0.0",
-    "dotenv": "^17.2.1"
-  },
-  "engines": {
-    "node": ">=18.0.0"
+    "name": "claude-proxy-server",
+    "version": "1.0.0",
+    "description": "Railway server for Claude API proxy and token management",
+    "main": "server-example.js",
+    "scripts": {
+      "start": "node server-example.js",
+      "dev": "node server-example.js"
+    },
+    "dependencies": {
+      "express": "^4.18.2",
+      "cors": "^2.8.5",
+      "googleapis": "^154.0.0"
+    },
+    "engines": {
+      "node": ">=18.0.0"
+    }
   }
-}
-
