@@ -153,9 +153,9 @@ async function findOrderInSheet(orderNumber) {
         const headers = rows[0];
         console.log('📋 Available columns:', headers);
         
-        // CRITICAL FIX: Look for ClientOrder column (based on your actual data structure)
+        // CRITICAL FIX: Look for ClientOrder column specifically (not just "order")
         const orderColumnIndex = headers.findIndex(header => 
-            header && (header.toLowerCase().includes('clientorder') || header.toLowerCase().includes('order'))
+            header && header.toLowerCase().includes('clientorder')
         );
         const tokensColumnIndex = headers.findIndex(header => 
             header && header.toLowerCase().includes('token')
