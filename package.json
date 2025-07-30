@@ -1,18 +1,19 @@
 {
-    "name": "claude-proxy-server",
-    "version": "1.0.0",
-    "description": "Railway server for Claude API proxy and token management",
-    "main": "server-example.js",
-    "scripts": {
-      "start": "node server-example.js",
-      "dev": "node server-example.js"
-    },
-    "dependencies": {
-      "express": "^4.18.2",
-      "cors": "^2.8.5",
-      "googleapis": "^154.0.0"
-    },
-    "engines": {
-      "node": ">=18.0.0"
-    }
+  "name": "claude-proxy-server",
+  "version": "1.0.1",
+  "description": "Railway server for claude-proxy-server token claiming - FIXED VERSION",
+  "main": "server-fixed.js",
+  "scripts": {
+    "start": "node server-fixed.js",
+    "dev": "node server-fixed.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.1",
+    "express": "^4.18.2",
+    "googleapis": "^154.1.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
+}
