@@ -909,7 +909,7 @@ app.post('/api/claude', authenticateRequest, async (req, res) => {
         console.log('Executing curl command...');
         
         // Execute curl command
-        exec(curlCommand, { timeout: 30000 }, (error, stdout, stderr) => {
+        exec(curlCommand, { timeout: 30000 }, async (error, stdout, stderr) => {
             if (error) {
                 console.error('Curl execution error:', error);
                 return res.status(500).json({
