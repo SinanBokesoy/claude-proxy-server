@@ -271,7 +271,10 @@ async function findOrderRowBySerial(serialNumber) {
         // Search for the serial number in order rows
         for (let i = 1; i < rows.length; i++) {
             const row = rows[i];
-            if (row[serialColumnIndex] === serialNumber) {
+            const rowSerialNumber = row[serialColumnIndex];
+            console.log(`🔍 Row ${i + 1}: Comparing "${rowSerialNumber}" with "${serialNumber}"`);
+            
+            if (rowSerialNumber === serialNumber) {
                 const tokens = parseInt(row[tokenColumnIndex]) || 0;
                 const isActivated = activatedColumnIndex !== -1 ? (row[activatedColumnIndex] === 'TRUE') : false;
                 const isTerminated = terminatedColumnIndex !== -1 ? (row[terminatedColumnIndex] === 'TRUE') : false;
@@ -587,10 +590,15 @@ app.post('/api/claim-tokens', authenticateRequest, async (req, res) => {
             }
             
             // Get the actual serial number from the found row
-            const actualSerialNumber = rows[orderInfo.rowIndex][serialColumnIndex];
+            // CRITICAL FIX: orderInfo.rowIndex is 1-based, but rows array is 0-based
+            const actualSerialNumber = rows[orderInfo.rowIndex - 1][serialColumnIndex];
+            
+            console.log(`🔍 CRITICAL DEBUG: orderInfo.rowIndex = ${orderInfo.rowIndex} (1-based)`);
+            console.log(`🔍 CRITICAL DEBUG: Accessing rows[${orderInfo.rowIndex - 1}] (0-based array index)`);
+            console.log(`🔍 CRITICAL DEBUG: Found serial number: ${actualSerialNumber}`);
             
             if (!actualSerialNumber || actualSerialNumber.trim() === '') {
-                console.log(`❌ No serial number found in row ${orderInfo.rowIndex + 1} for order ${order_number}`);
+                console.log(`❌ No serial number found in row ${orderInfo.rowIndex} for order ${order_number}`);
                 return res.json({
                     success: false,
                     error: 'No serial number found for this order',
@@ -838,6 +846,7 @@ app.post('/api/claude', authenticateRequest, async (req, res) => {
         }
         
         try {
+            console.log(`🔍 CRITICAL DEBUG: Looking for serial number: "${serial_number}"`);
             const orderRowInfo = await findOrderRowBySerial(serial_number);
             
             if (!orderRowInfo) {
@@ -848,6 +857,18 @@ app.post('/api/claude', authenticateRequest, async (req, res) => {
                     timestamp: new Date().toISOString()
                 });
             }
+            
+            // CRITICAL: Check if account is activated
+            console.log(`🔍 ACTIVATION CHECK: orderRowInfo.isActivated = ${orderRowInfo.isActivated}`);
+            if (!orderRowInfo.isActivated) {
+                console.log(`❌ Account ${serial_number} is not activated - blocking API access`);
+                return res.status(403).json({
+                    error: 'Account is not activated - API access denied',
+                    serial_number: serial_number,
+                    timestamp: new Date().toISOString()
+                });
+            }
+            console.log(`✅ ACTIVATION CHECK PASSED: Account ${serial_number} is activated`);
             
             // Check if account is terminated
             if (orderRowInfo.isTerminated) {
@@ -870,7 +891,7 @@ app.post('/api/claude', authenticateRequest, async (req, res) => {
                 });
             }
             
-            console.log(`✅ Account ${serial_number} validated - tokens: ${orderRowInfo.currentTokens}, allowing API access`);
+            console.log(`✅ Account ${serial_number} validated - tokens: ${orderRowInfo.currentTokens}, activated: ${orderRowInfo.isActivated}, terminated: ${orderRowInfo.isTerminated}, allowing API access`);
             
         } catch (validationError) {
             console.error('❌ Account validation failed:', validationError);
@@ -986,6 +1007,7 @@ app.post('/api/claude', authenticateRequest, async (req, res) => {
                 console.log(`🔄 STEP 3: Auto-consuming ${totalTokensConsumed} tokens for user ${serial_number}`);
                 
                 try {
+                    console.log(`🔍 CRITICAL DEBUG: Auto-consuming tokens for serial: "${serial_number}"`);
                     const orderRowInfo = await findOrderRowBySerial(serial_number);
                     
                     if (orderRowInfo && orderRowInfo.currentTokens >= totalTokensConsumed) {
