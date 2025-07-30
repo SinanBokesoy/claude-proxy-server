@@ -1042,11 +1042,24 @@ app.post('/api/claude', authenticateRequest, async (req, res) => {
                         res.json(responsePayload);
                     } else {
                         console.log(`❌ Insufficient tokens for API call - required: ${totalTokensConsumed}, available: ${orderRowInfo?.currentTokens || 0}`);
+                        
+                        // TERMINATION LOGIC: If account has insufficient tokens, terminate it
+                        if (orderRowInfo && orderRowInfo.terminatedColumnIndex !== -1 && !orderRowInfo.isTerminated) {
+                            console.log(`⚠️ Account has insufficient tokens (${orderRowInfo.currentTokens}) - terminating account`);
+                            try {
+                                await updateTerminatedStatus(orderRowInfo.rowIndex, orderRowInfo.terminatedColumnIndex);
+                                console.log(`✅ Account ${serial_number} terminated due to insufficient tokens`);
+                            } catch (terminationError) {
+                                console.error(`❌ Failed to terminate account: ${terminationError.message}`);
+                            }
+                        }
+                        
                         res.status(403).json({
                             error: 'Insufficient tokens for API call',
                             required: totalTokensConsumed,
                             available: orderRowInfo?.currentTokens || 0,
                             serial_number: serial_number,
+                            was_terminated: orderRowInfo && !orderRowInfo.isTerminated,
                             timestamp: new Date().toISOString()
                         });
                     }
