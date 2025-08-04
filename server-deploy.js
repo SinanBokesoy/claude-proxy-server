@@ -905,21 +905,39 @@ app.post('/api/claude', authenticateRequest, async (req, res) => {
         console.log('🔄 STEP 2: Making request to Claude API...');
         console.log('API Key present:', !!process.env.CLAUDE_API_KEY);
         console.log('Using model:', model);
-        console.log('Message length:', message.length);
         
-        // Create the request payload
+        // Extract system prompt and user message
+        const systemPrompt = req.body.system_prompt || message;
+        const userMessage = req.body.user_message || message;
+        
+        console.log('System prompt length:', systemPrompt.length);
+        console.log('User message length:', userMessage.length);
+        
+        // Create the request payload with proper caching structure
         const requestPayload = {
             model: model,
             max_tokens: 2500,
+            system: [
+                {
+                    type: 'text',
+                    text: systemPrompt,
+                    cache_control: { type: 'ephemeral' }
+                }
+            ],
             messages: [
                 {
                     role: 'user',
-                    content: message
+                    content: userMessage
                 }
             ]
         };
         
         const jsonString = JSON.stringify(requestPayload);
+        
+        console.log('Request payload structure:');
+        console.log('- Has system array:', !!requestPayload.system);
+        console.log('- System cache_control:', requestPayload.system?.[0]?.cache_control);
+        console.log('- Messages array length:', requestPayload.messages?.length);
         
         // Use curl command to call Claude API
         const curlCommand = `curl -s -w "\\n%{http_code}" -X POST https://api.anthropic.com/v1/messages ` +
