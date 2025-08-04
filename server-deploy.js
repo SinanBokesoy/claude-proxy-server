@@ -1020,11 +1020,30 @@ app.post('/api/claude', authenticateRequest, async (req, res) => {
                     cache_read: responseData.usage?.cache_read_input_tokens || 0
                 };
                 
-                const totalTokensConsumed = tokenUsage.input + tokenUsage.output + 
-                                          tokenUsage.cache_creation + tokenUsage.cache_read;
+                // Claude Sonnet 4 pricing per million tokens
+                const INPUT_COST_PER_MTOK = 3.00;        // $3.00 per million input tokens
+                const OUTPUT_COST_PER_MTOK = 15.00;      // $15.00 per million output tokens  
+                const CACHE_CREATE_COST_PER_MTOK = 3.75; // $3.75 per million cache creation tokens
+                const CACHE_READ_COST_PER_MTOK = 0.30;   // $0.30 per million cache read tokens
+                const BASE_TOKEN_COST_PER_MTOK = 3.00;   // Use input token cost as base for conversion
+                
+                // Calculate actual API cost in dollars
+                const actualCost = (tokenUsage.input * INPUT_COST_PER_MTOK / 1000000.0) +
+                                  (tokenUsage.output * OUTPUT_COST_PER_MTOK / 1000000.0) +
+                                  (tokenUsage.cache_creation * CACHE_CREATE_COST_PER_MTOK / 1000000.0) +
+                                  (tokenUsage.cache_read * CACHE_READ_COST_PER_MTOK / 1000000.0);
+                
+                // Convert cost back to equivalent tokens (using base input token cost)
+                const totalTokensConsumed = Math.round(actualCost * 1000000.0 / BASE_TOKEN_COST_PER_MTOK);
+                
+                // Old simple addition for comparison
+                const simpleTokenSum = tokenUsage.input + tokenUsage.output + tokenUsage.cache_creation + tokenUsage.cache_read;
                 
                 console.log('Token usage:', tokenUsage);
-                console.log('Total tokens consumed:', totalTokensConsumed);
+                console.log('Actual API cost: $' + actualCost.toFixed(6));
+                console.log('Cost-based tokens consumed:', totalTokensConsumed);
+                console.log('Simple sum (old method):', simpleTokenSum);
+                console.log('Savings from proper calculation:', simpleTokenSum - totalTokensConsumed, 'tokens');
                 
                 // STEP 3: Automatically consume tokens from user's account
                 console.log(`🔄 STEP 3: Auto-consuming ${totalTokensConsumed} tokens for user ${serial_number}`);
