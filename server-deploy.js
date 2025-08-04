@@ -820,10 +820,11 @@ app.post('/api/claude', authenticateRequest, async (req, res) => {
     console.log('🎯 Claude API request received:', JSON.stringify(req.body, null, 2));
     
     try {
-        const { message, model = 'claude-sonnet-4-20250514', device_id, serial_number } = req.body;
+        const { message, system_prompt, user_message, model = 'claude-sonnet-4-20250514', device_id, serial_number } = req.body;
         
-        if (!message) {
-            return res.status(400).json({ error: 'Message is required' });
+        // Support both old format (message) and new format (system_prompt + user_message)
+        if (!message && !system_prompt && !user_message) {
+            return res.status(400).json({ error: 'Message, system_prompt, or user_message is required' });
         }
         
         if (!serial_number) {
@@ -910,8 +911,12 @@ app.post('/api/claude', authenticateRequest, async (req, res) => {
         const systemPrompt = req.body.system_prompt || message;
         const userMessage = req.body.user_message || message;
         
-        console.log('System prompt length:', systemPrompt.length);
-        console.log('User message length:', userMessage.length);
+        console.log('Request format detection:');
+        console.log('- Has message:', !!message);
+        console.log('- Has system_prompt:', !!req.body.system_prompt);
+        console.log('- Has user_message:', !!req.body.user_message);
+        console.log('System prompt length:', systemPrompt?.length || 0);
+        console.log('User message length:', userMessage?.length || 0);
         
         // Create the request payload with proper caching structure
         const requestPayload = {
