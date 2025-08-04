@@ -7,6 +7,24 @@ require('dotenv').config(); // CRITICAL: Load environment variables
 const app = express();
 const PORT = process.env.PORT || 10000;
 
+// Utility function to mask sensitive data for logging
+function maskSensitiveData(data, type = 'serial') {
+    if (!data || typeof data !== 'string') return data;
+    
+    if (type === 'serial') {
+        // Show first 4 and last 4 characters: "374F...A4E6"
+        if (data.length > 8) {
+            return data.substring(0, 4) + '...' + data.substring(data.length - 4);
+        }
+        return data.substring(0, 2) + '...';
+    } else if (type === 'device') {
+        // Show first 3 characters: "c07..."
+        return data.substring(0, 3) + '...';
+    }
+    
+    return data;
+}
+
 // Enhanced security middleware
 app.use(cors({
     origin: process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : '*',
@@ -847,7 +865,7 @@ app.post('/api/claude', authenticateRequest, async (req, res) => {
         }
         
         try {
-            console.log(`🔍 CRITICAL DEBUG: Looking for serial number: "${serial_number}"`);
+            console.log(`🔍 CRITICAL DEBUG: Looking for serial number: "${maskSensitiveData(serial_number)}"`);
             const orderRowInfo = await findOrderRowBySerial(serial_number);
             
             if (!orderRowInfo) {
