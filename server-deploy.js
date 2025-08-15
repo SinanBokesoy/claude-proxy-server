@@ -838,7 +838,7 @@ app.post('/api/claude', authenticateRequest, async (req, res) => {
     console.log('🎯 Claude API request received:', JSON.stringify(req.body, null, 2));
     
     try {
-        const { message, system_prompt, user_message, model = 'claude-3-5-haiku-20241022', device_id, serial_number } = req.body;
+        const { message, system_prompt, user_message, model = 'claude-sonnet-4-20250514', device_id, serial_number } = req.body;
         
         // Support both old format (message) and new format (system_prompt + user_message)
         if (!message && !system_prompt && !user_message) {
@@ -940,6 +940,7 @@ app.post('/api/claude', authenticateRequest, async (req, res) => {
         const requestPayload = {
             model: model,
             max_tokens: 2500,
+            temperature: 0.0,
             system: [
                 {
                     type: 'text',
